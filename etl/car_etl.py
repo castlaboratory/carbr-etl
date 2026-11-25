@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["duckdb>=1.1", "boto3>=1.34"]
+# dependencies = ["duckdb==2.0.1", "boto3==1.44.11"]
 # ///
 """ETL dos imóveis do CAR: geoserviço público do Sicar -> GeoParquet -> bucket.
 
@@ -16,6 +16,7 @@
     uv run etl/car_etl.py summary         # (re)gera o resumo pré-calculado a partir do bucket
     uv run etl/car_etl.py web             # envia a página de consulta (web/) à raiz do bucket
     uv run etl/car_etl.py history         # inicia o histórico com a carga publicada (uma vez)
+    uv run etl/car_etl.py backup          # copia o histórico do bucket para data/history-backup/
 
 Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
 O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import re
@@ -43,6 +45,8 @@ PAUSE_S = 2
 USER_AGENT = "carbr-etl/0.1 (+https://github.com/castlaboratory/carbr-etl)"
 # Um estado cuja contagem nova fique abaixo desta fração da publicada não é substituído.
 MIN_RATIO = 0.95
+# O download de um estado tem de trazer ao menos esta fração do total que o Sicar informa.
+MIN_COMPLETE = 0.995
 # Download parcial mais velho que isto é descartado antes de recomeçar (horas).
 STALE_HOURS = 36
 # Do menor para o maior (contagem de 24/11/2026).
@@ -182,6 +186,9 @@ def download(uf: str) -> None:
                  "pages": n, "features": total, "page_size": PAGE, "source": WFS, "layer": layer}
     manifest_path.write_text(json.dumps(manifest, indent=2))
     log(f"{uf}: {total} feições em {n} páginas")
+    expected = manifest["matched_at_end"] or manifest.get("matched_at_start")
+    if expected and total < MIN_COMPLETE * expected:
+        raise RuntimeError(f"{uf}: download incompleto, {total} feições de {expected} informadas pelo Sicar")
 
 
 def sha256(path: Path) -> str:
@@ -551,6 +558,42 @@ def history_init(ufs: list[str]) -> None:
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
 
 
+def backup_history() -> None:
+    """Copia para o disco local o que há em `history/` no bucket (os arquivos nunca mudam).
+
+    Os dados correntes podem ser baixados de novo do Sicar; o histórico, não.
+    """
+    s3, name = bucket()
+    dest = ROOT / "history-backup"
+    copied, kw = 0, {"Bucket": name, "Prefix": "history/"}
+    while True:
+        page = s3.list_objects_v2(**kw)
+        for obj in page.get("Contents", []):
+            path = dest / obj["Key"]
+            if not path.exists() or path.stat().st_size != obj["Size"]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                s3.download_file(name, obj["Key"], str(path))
+                copied += 1
+        if not page.get("IsTruncated"):
+            break
+        kw["ContinuationToken"] = page["NextContinuationToken"]
+    catalog = dest / "catalog" / f"{dt.datetime.now(dt.UTC):%Y-%m-%d}.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(json.dumps(remote_catalog(s3, name), indent=2, ensure_ascii=False))
+    log(f"histórico: {copied} arquivos novos copiados para {dest}")
+
+
+def exclusive():
+    """Só uma execução por vez mexe nos dados locais e no catálogo."""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    handle = open(ROOT / ".lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("outra execução do ETL está em andamento; nada foi feito") from None
+    return handle
+
+
 def clean(uf: str) -> None:
     """Apaga os dados locais de um estado (brutos e gerados)."""
     for d in (ROOT / "raw" / uf.lower(), ROOT / "release" / uf):
@@ -587,18 +630,25 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
             failed[uf] = str(err)
             log(f"{uf}: FALHOU — {err}")
     log(f"fila concluída: {len(todo) - len(failed)} de {len(todo)} estados publicados")
+    try:
+        backup_history()
+    except Exception as err:  # a cópia de segurança não invalida a rodada
+        log(f"histórico: cópia de segurança FALHOU — {err}")
     if failed:
         raise SystemExit(f"estados com falha: {failed}")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history"])
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history", "backup"])
     ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
     a = ap.parse_args()
     ufs = [u.upper() for u in a.uf]
+    lock = exclusive() if a.step not in ("verify", "web") else None
     if a.step == "refresh":
         run_all(ufs, refresh=True)
+    elif a.step == "backup":
+        backup_history()
     elif a.step in ("all", "verify", "summary", "web", "history"):
         {"all": run_all, "verify": verify, "summary": summary, "web": web, "history": history_init}[a.step](ufs)
     else:

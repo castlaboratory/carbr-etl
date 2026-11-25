@@ -47,6 +47,9 @@ cada outra: `from_date`, `to_date`, `from_status`, `to_status`, `from_condition`
 `size_class`, `properties`, `area_ha`. `from_*` nulo é imóvel que entrou no cadastro; `to_*` nulo, que saiu.
 As datas de cada estado ficam em `history` no `catalog.json`. A série começa em 25/11/2026.
 
+Ao fim de cada rodada, o histórico e uma cópia datada do catálogo são copiados do bucket para
+`data/history-backup/`, porque esses arquivos não podem ser refeitos a partir do Sicar.
+
 ## Uso
 
 Precisa do [uv](https://docs.astral.sh/uv/); as dependências estão declaradas no próprio script.
