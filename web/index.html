@@ -279,6 +279,41 @@ const propertiesPath = (uf) => `properties/state=${uf}/part-0.parquet`;
 const FIELDS = ["property_code", "status", "condition", "property_type", "created_at", "area_ha",
   "fiscal_modules", "size_class", "state", "municipality", "municipality_code"];
 
+// ---- Indicadores de qualidade: sobreposição e área fora do município ----
+// Acrescenta overlap_count, overlap_share e outside_share a cada linha. Se a publicação não
+// trouxer os indicadores, ou a leitura falhar, as linhas seguem sem eles.
+async function withQuality(rows) {
+  const byState = {};
+  rows.forEach((p) => (byState[p.state] ??= []).push(p));
+  await Promise.all(Object.entries(byState).map(async ([uf, group]) => {
+    const path = `quality/state=${uf}.parquet`;
+    if (!catalog.files.some((f) => f.path === path)) return;
+    try {
+      const towns = [...new Set(group.map((p) => p.municipality_code))];
+      const filter = { municipality_code: towns.length === 1 ? { $eq: towns[0] } : { $in: towns } };
+      if (group.length <= 500) filter.property_code = { $in: group.map((p) => p.property_code) };
+      const found = new Map((await read(path, { filter })).map((q) => [q.property_code, q]));
+      group.forEach((p) => {
+        const q = found.get(p.property_code);
+        if (q) Object.assign(p, { overlap_count: Number(q.overlap_count), overlap_share: q.overlap_share, outside_share: q.outside_share });
+      });
+    } catch (error) {
+      console.warn("Indicadores de qualidade indisponíveis", error);
+    }
+  }));
+  return rows;
+}
+const pct = (share) => (share >= 0.995 ? "toda a área" : `${Math.max(1, Math.round(100 * share))}% da área`);
+function overlapText(p) {
+  if (p.overlap_share === undefined) return p.status === "cancelled" ? "Não calculada (cancelado)" : "—";
+  if (!(p.overlap_share >= 0.01)) return "Nenhuma relevante";
+  return `${pct(p.overlap_share)}, com ${int.format(p.overlap_count)} ${p.overlap_count === 1 ? "cadastro" : "cadastros"}`;
+}
+function outsideText(p) {
+  if (p.outside_share === undefined || p.outside_share === null) return "—";
+  return p.outside_share >= 0.01 ? pct(p.outside_share) : "Nada relevante";
+}
+
 // ---- O que cada etapa quer dizer, em linguagem simples ----
 function stageOf(condition) {
   if (condition.startsWith("Cancelado")) return "cancelled";
@@ -435,6 +470,8 @@ function record(p) {
       <div><dt>Módulos fiscais</dt><dd>${ha.format(p.fiscal_modules)}</dd></div>
       <div><dt>Tipo</dt><dd>${TYPES[p.property_type] ?? "—"}</dd></div>
       <div><dt>Cadastrado em</dt><dd>${created}</dd></div>
+      <div><dt>Sobreposta a outros cadastros</dt><dd>${overlapText(p)}</dd></div>
+      <div><dt>Fora do município declarado</dt><dd>${outsideText(p)}</dd></div>
     </dl>`;
   el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
   el.querySelector(".code").textContent = p.property_code;
@@ -547,6 +584,7 @@ map.on("mousemove", "found-fill", (event) => {
       Object.assign(document.createElement("strong"), { textContent: STAGES[p.stage].label }),
       Object.assign(document.createElement("p"), { textContent: `${ha.format(p.area_ha)} ha, ${(SIZES[p.size_class] ?? "").split(" (")[0].toLowerCase()}` }),
       Object.assign(document.createElement("p"), { textContent: `${TYPES[p.property_type] ?? "Imóvel"} em ${p.municipality}, ${p.state}` }),
+      ...(p.overlap_share >= 0.01 ? [Object.assign(document.createElement("p"), { textContent: `Sobreposto em ${pct(p.overlap_share)}` })] : []),
       Object.assign(document.createElement("p"), { textContent: here.length > 1
         ? `Mais ${here.length - 1} ${here.length === 2 ? "cadastro cobre" : "cadastros cobrem"} este ponto. Clique para ver as fichas.`
         : "Clique para ver a ficha." }),
@@ -601,7 +639,7 @@ map.on("click", (event) => {
   consult(states, async () => {
     const filter = { xmin: { $lte: x }, xmax: { $gte: x }, ymin: { $lte: y }, ymax: { $gte: y } };
     const parts = await Promise.all(states.map((uf) => read(propertiesPath(uf), { columns: [...FIELDS, "geometry"], filter })));
-    const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y));
+    const rows = await withQuality(parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y)));
     if (rows.length === 0 && scope) { say("Nenhum imóvel declarado neste ponto."); return; }
     scope = null; outline(null);
     choose(at(draw(rows), x, y));
@@ -630,7 +668,7 @@ $("by-code").addEventListener("submit", (event) => {
     if (rows.length === 0) rows = await read(propertiesPath(uf), { columns, filter: { property_code: { $eq: code } } });
     pin?.remove();
     scope = null; outline(null);
-    choose(draw(rows));
+    choose(draw(await withQuality(rows)));
     say(rows.length ? "Imóvel encontrado." : "Não há imóvel com esse código nesta publicação. Ele pode ter sido cadastrado depois da última atualização.");
   });
 });
@@ -709,7 +747,7 @@ $("by-place").addEventListener("submit", (event) => {
   consult([uf], async () => {
     const rows = await read(propertiesPath(uf), { columns: [...FIELDS, "geometry"],
       filter: { municipality_code: { $eq: town.municipality_code } } });
-    draw(rows);
+    draw(await withQuality(rows));
     const small = Math.round((100 * town.small_properties) / town.properties);
     const text = `${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. A linha branca é o limite do município. Clique num imóvel para ver a ficha.`;
     scope = { town, uf, text };
