@@ -77,6 +77,19 @@ journalctl --user -u car-etl.service      # log da última rodada
 
 O serviço espera o repositório em `~/carbr-etl`.
 
+### Aviso por e-mail
+
+Ao fim de cada rodada, com sucesso ou falha, o serviço dispara `car-etl-notify@.service`, que envia um
+resumo do log para o endereço em `NOTIFY_TO` (no `.env`). O envio usa o `msmtp`; `deploy/msmtprc.example`
+traz a configuração para o relay SMTP do Google Workspace. Sem `NOTIFY_TO`, nada é enviado, e uma falha
+no aviso não afeta a atualização.
+
+```bash
+sudo apt install msmtp
+cp deploy/msmtprc.example ~/.msmtprc && chmod 600 ~/.msmtprc
+cp deploy/car-etl-notify@.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+```
+
 ## Sobre os dados
 
 - O Sicar não informa a data de alteração de um cadastro, só a de criação. Por isso cada

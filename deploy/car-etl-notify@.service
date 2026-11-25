@@ -1,0 +1,6 @@
+[Unit]
+Description=Aviso por e-mail do resultado da atualização do CAR (%i)
+
+[Service]
+Type=oneshot
+ExecStart=%h/carbr-etl/deploy/notify.sh %i

@@ -1,0 +1,17 @@
+# ~/.msmtprc (chmod 600) — envia pelo relay SMTP do Google Workspace, autenticado pelo IP do servidor.
+# No Google Admin: Apps > Google Workspace > Gmail > Roteamento > Serviço de retransmissão SMTP,
+# liberando o IP público do servidor e exigindo TLS.
+defaults
+tls on
+tls_starttls on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile ~/.msmtp.log
+
+account relay
+host smtp-relay.gmail.com
+port 587
+auth off
+domain castlab.org
+from dev@castlab.org
+
+account default : relay
