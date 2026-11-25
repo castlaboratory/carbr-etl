@@ -41,7 +41,9 @@
 
   form { display: grid; gap: .4rem; padding-block: .9rem; border-top: 1px solid var(--line); }
   label { font-weight: 600; }
-  .row { display: flex; gap: .5rem; }
+  .row { display: flex; gap: .5rem; min-width: 0; }
+  form { min-width: 0; }
+  .row > button { flex: none; }
   input, select, button { font: inherit; color: inherit; }
   input, select {
     min-width: 0; flex: 1; padding: .55rem .65rem; background: #fff;
@@ -50,8 +52,10 @@
   .combo { position: relative; flex: 1; min-width: 0; display: flex; }
   .combo.narrow { flex: 0 0 4.6rem; }
   .combo.narrow input { text-transform: uppercase; }
+  .combo.narrow ul { width: 13.5rem; max-width: calc(100vw - 2rem); }
+  .combo li { overflow-wrap: anywhere; }
   .combo ul {
-    position: absolute; z-index: 5; top: calc(100% - 1.5px); left: 0; min-width: 100%; width: max-content; max-width: 22rem;
+    position: absolute; z-index: 5; top: calc(100% - 1.5px); left: 0; width: 100%;
     max-height: 16rem; overflow-y: auto; margin: 0; padding: 0; list-style: none;
     background: #fff; border: 1.5px solid var(--ink); border-radius: 2px;
   }
