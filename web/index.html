@@ -119,6 +119,9 @@
     #map { height: 52vh; }
     #sheet > * { padding-inline: 1rem; }
     #masthead h1 { font-size: 1.9rem; }
+    /* No celular, a resposta vem logo abaixo do mapa. */
+    body.answered #status, body.answered #back, body.answered #results, body.answered #meter { order: -1; }
+    body.answered #status { border-top: 0; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -169,7 +172,7 @@
   </section>
 
   <footer>
-    <p>Fonte: Sicar, Serviço Florestal Brasileiro. Dados de <span id="version">—</span>, atualizados toda semana. O cadastro é autodeclarado: há sobreposições, e constar no CAR não comprova a posse nem a propriedade.</p>
+    <p>Fonte: Sicar, Serviço Florestal Brasileiro; limites municipais do IBGE. Dados de <span id="version">—</span>, atualizados toda semana. O cadastro é autodeclarado: há sobreposições, e constar no CAR não comprova a posse nem a propriedade.</p>
     <p>Republicação independente, sem caráter oficial; em caso de divergência, vale o Sicar. Não há dados pessoais.</p>
     <p>Para análises: <a href="https://castlaboratory.github.io/carbr-r/">carbr para R</a> e <a href="https://castlaboratory.github.io/carbr-py/">carbr para Python</a>. Código aberto: <a href="https://github.com/castlaboratory/carbr-etl">carbr-etl</a>.</p>
   </footer>
@@ -263,6 +266,7 @@ const map = new maplibregl.Map({
         tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
         attribution: "© colaboradores do OpenStreetMap" },
       found: { type: "geojson", data: { type: "FeatureCollection", features: [] }, promoteId: "property_code" },
+      boundary: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
     },
     layers: [
       { id: "satellite", type: "raster", source: "satellite" },
@@ -271,6 +275,8 @@ const map = new maplibregl.Map({
         paint: { "fill-color": byStage, "fill-opacity": ["case", current, 0.8, picked, 0.6, 0.42] } },
       { id: "found-line", type: "line", source: "found",
         paint: { "line-color": ["case", picked, "#ffffff", byStage], "line-width": ["case", current, 4, picked, 2.2, 0.6] } },
+      { id: "boundary-casing", type: "line", source: "boundary", paint: { "line-color": "#14301f", "line-width": 5, "line-opacity": 0.55 } },
+      { id: "boundary-line", type: "line", source: "boundary", paint: { "line-color": "#ffffff", "line-width": 2.2 } },
     ],
   },
   bounds: [[-74, -34], [-34, 5.5]],
@@ -280,6 +286,19 @@ const map = new maplibregl.Map({
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 map.getCanvas().style.cursor = "crosshair";
 let pin = null;
+// Limite do município, da malha do IBGE. Se a API não responder, o mapa segue sem ele.
+const EMPTY = { type: "FeatureCollection", features: [] };
+async function outline(code) {
+  map.getSource("boundary").setData(EMPTY);
+  if (!code) return;
+  try {
+    const url = `https://servicodados.ibge.gov.br/api/v3/malhas/municipios/${code}?formato=application/vnd.geo%2Bjson&qualidade=maxima`;
+    const response = await fetch(url);
+    if (response.ok && scope?.town.municipality_code === code) map.getSource("boundary").setData(await response.json());
+  } catch (error) {
+    console.warn("Limite municipal indisponível", error);
+  }
+}
 const fit = (bounds, padding = 60) => map.fitBounds(bounds, { padding, maxZoom: 15, duration: 500 });
 
 $("basemap").addEventListener("click", () => {
@@ -317,7 +336,10 @@ const at = (rows, x, y) => rows.filter((p) => p.box[0] <= x && p.box[2] >= x && 
   .sort((a, b) => a.area_ha - b.area_ha);
 
 // ---- Interface ----
-function say(text, kind = "") { $("status").textContent = text; $("status").dataset.kind = kind; }
+function say(text, kind = "") {
+  $("status").textContent = text; $("status").dataset.kind = kind;
+  document.body.classList.toggle("answered", drawn.length > 0);
+}
 function busy(on) { document.querySelectorAll("form button").forEach((b) => (b.disabled = on)); }
 
 performance.setResourceTimingBufferSize?.(4000);
@@ -419,7 +441,7 @@ $("clear").addEventListener("click", () => {
     fit([[scope.town.xmin, scope.town.ymin], [scope.town.xmax, scope.town.ymax]], 30);
     say(scope.text);
   } else {
-    draw([]);
+    draw([]); outline(null);
     $("meter").hidden = true;
     say("Clique num ponto do mapa ou informe o código de um imóvel.");
   }
@@ -478,7 +500,7 @@ map.on("click", (event) => {
     const parts = await Promise.all(states.map((uf) => read(propertiesPath(uf), { columns: [...FIELDS, "geometry"], filter })));
     const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y));
     if (rows.length === 0 && scope) { say("Nenhum imóvel declarado neste ponto."); return; }
-    scope = null;
+    scope = null; outline(null);
     choose(at(draw(rows), x, y));
     say(rows.length ? found(rows.length) : "Nenhum imóvel declarado neste ponto.");
   });
@@ -504,7 +526,7 @@ $("by-code").addEventListener("submit", (event) => {
     // Alguns imóveis estão registrados em município diferente do que o código indica.
     if (rows.length === 0) rows = await read(propertiesPath(uf), { columns, filter: { property_code: { $eq: code } } });
     pin?.remove();
-    scope = null;
+    scope = null; outline(null);
     choose(draw(rows));
     say(rows.length ? "Imóvel encontrado." : "Não há imóvel com esse código nesta publicação. Ele pode ter sido cadastrado depois da última atualização.");
   });
@@ -531,8 +553,9 @@ $("by-place").addEventListener("submit", (event) => {
       filter: { municipality_code: { $eq: town.municipality_code } } });
     draw(rows);
     const small = Math.round((100 * town.small_properties) / town.properties);
-    const text = `${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. Clique num imóvel para ver a ficha.`;
+    const text = `${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. A linha branca é o limite do município. Clique num imóvel para ver a ficha.`;
     scope = { town, uf, text };
+    outline(town.municipality_code);
     fit([[town.xmin, town.ymin], [town.xmax, town.ymax]], 30);
     say(text);
   });
