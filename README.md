@@ -71,6 +71,17 @@ O serviço espera o repositório em `~/carbr-etl`.
   atualização baixa tudo de novo.
 - A publicação traz o perímetro declarado e dez atributos de cada imóvel. Não há dado pessoal.
 - O cadastro é autodeclarado: há sobreposições, e a presença no CAR não comprova domínio.
+- **Base normativa:** a Instrução Normativa MMA nº 3, de 18/12/2014, garante o livre acesso às
+  informações não sigilosas e não pessoais do Sicar (arts. 12 e 18). São sigilosas as que
+  identificam proprietários ou possuidores ou os associam aos imóveis (art. 4º); nenhuma delas
+  está nesta publicação.
+- **Finalidade:** pela mesma norma (art. 2º), as informações do CAR se destinam a subsidiar
+  políticas, programas, projetos e atividades de controle, monitoramento, planejamento ambiental
+  e econômico e combate ao desmatamento. O uso para outros fins que cause dano a terceiros pode
+  gerar responsabilização.
+- **Sem caráter oficial:** é uma republicação independente, feita pelo CastLab/UFPE. Não é um
+  produto do Serviço Florestal Brasileiro nem substitui o Sicar; em caso de divergência, vale o
+  Sicar.
 
 ## Como citar
 

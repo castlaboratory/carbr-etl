@@ -74,6 +74,21 @@ DICTIONARY = [
 ]
 
 
+# Vai no catálogo, para quem lê os dados saber de onde vêm e em que termos.
+SOURCE = {
+    "name": "SFB / Sicar — Cadastro Ambiental Rural",
+    "url": WFS,
+    "legal_basis": "Instrução Normativa MMA nº 3, de 18/12/2014 (arts. 2º, 4º, 12 e 18)",
+    "notice": (
+        "Informações não sigilosas e não pessoais do Sicar, de livre acesso. Não há dado que "
+        "identifique proprietários ou possuidores. Cadastro autodeclarado: há sobreposições, e a "
+        "presença no CAR não comprova domínio. Destinam-se a subsidiar políticas, programas, "
+        "projetos e atividades de controle, monitoramento, planejamento ambiental e econômico e "
+        "combate ao desmatamento. Republicação independente do CastLab/UFPE, sem caráter oficial; "
+        "em caso de divergência, vale o Sicar."
+    ),
+}
+
 # Resumo pré-calculado: uma linha por combinação, para agregações nacionais sem ler os imóveis.
 SUMMARY_SQL = """
     SELECT state, status, size_class, property_type, condition,
@@ -376,7 +391,7 @@ def publish(uf: str) -> None:
     cat["files"] = sorted([f for f in cat["files"] if f["path"] not in local] + files,
                           key=lambda f: f["path"])
     cat["version"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
-    cat["source"] = {"name": "SFB / Sicar — Cadastro Ambiental Rural", "url": WFS}
+    cat["source"] = SOURCE
     cat["crs"] = "EPSG:4674"
     s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
