@@ -75,7 +75,9 @@ As terras indígenas vêm do serviço de mapas da Funai (camada `tis_poligonais`
 processo). As unidades de conservação vêm do Cadastro Nacional de Unidades de Conservação (CNUC), pelo
 mesmo pedido que o botão de download do [mapa do CNUC](https://cnuc.mma.gov.br/map) faz (dados
 correntes); se ele falhar, do último shapefile semestral do portal de dados do MMA. Com
-`CAR_PROTECTED_OFFLINE=1`, nada é baixado e o cálculo usa o que já está em disco. As duas camadas ficam em `data/protected/`
+`CAR_PROTECTED_OFFLINE=1`, nada é baixado e o cálculo usa o que já está em disco. O servidor da Funai não envia
+o certificado intermediário da sua cadeia; para o Linux validar a conexão sem desligar a verificação, o
+ETL soma às raízes do sistema o intermediário guardado em `etl/certs/`. As duas camadas ficam em `data/protected/`
 por 30 dias, e a edição usada vai para `source.protected_areas` no catálogo. Estar em unidade de uso
 sustentável não é irregularidade: APA e RPPN admitem imóveis privados.
 

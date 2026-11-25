@@ -597,11 +597,29 @@ CNUC_DATASET = "https://dados.mma.gov.br/api/3/action/package_show?id=unidadesde
 BROWSER_AGENT = "Mozilla/5.0 (compatible; carbr-etl; +https://github.com/castlaboratory/carbr-etl)"
 
 
-def get(url: str, dest: Path, timeout: int = 900) -> bool:
+# O servidor da Funai não envia o certificado intermediário (Sectigo OV R36). O macOS o busca
+# sozinho; no Linux a verificação falha. Em vez de desligá-la, o intermediário vai junto das raízes
+# do sistema. Ele vale até 2036; se a Funai trocar de autoridade, basta trocar o arquivo.
+EXTRA_CA = Path(__file__).resolve().parent / "certs" / "sectigo-ov-r36.pem"
+SYSTEM_CA = ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"]
+
+
+def ca_bundle() -> list[str]:
+    """Argumentos do curl para confiar nas raízes do sistema mais o intermediário guardado aqui."""
+    system = next((Path(p) for p in SYSTEM_CA if Path(p).exists()), None)
+    if system is None or not EXTRA_CA.exists():
+        return []
+    bundle = ROOT / "protected" / "ca-bundle.pem"
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    bundle.write_text(system.read_text() + "\n" + EXTRA_CA.read_text())
+    return ["--cacert", str(bundle)]
+
+
+def get(url: str, dest: Path, timeout: int = 900, extra_ca: bool = False) -> bool:
     """Baixa `url` para `dest` (por um arquivo temporário). Devolve se deu certo."""
     tmp = dest.with_name(dest.name + ".part")
     rc = subprocess.run(["curl", "-sS", "--fail", "--compressed", "-L", "-m", str(timeout), "-A", BROWSER_AGENT,
-                         "-o", str(tmp), url]).returncode
+                         *(ca_bundle() if extra_ca else []), "-o", str(tmp), url]).returncode
     if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         tmp.unlink(missing_ok=True)
         return False
@@ -665,7 +683,7 @@ def protected() -> Path | None:
     cnuc = "MMA, Cadastro Nacional de Unidades de Conservação (CNUC)"
     try:
         if not offline:
-            if not get(FUNAI_WFS, funai) or not json.loads(funai.read_text())["features"]:
+            if not get(FUNAI_WFS, funai, extra_ca=True) or not json.loads(funai.read_text())["features"]:
                 raise ValueError("resposta vazia")
             info["indigenous"] = {"source": "Funai, Terras Indígenas (tis_poligonais)", "downloaded": today}
     except Exception as err:
