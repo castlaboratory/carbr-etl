@@ -50,6 +50,25 @@ As datas de cada estado ficam em `history` no `catalog.json`. A série começa e
 Ao fim de cada rodada, o histórico e uma cópia datada do catálogo são copiados do bucket para
 `data/history-backup/`, porque esses arquivos não podem ser refeitos a partir do Sicar.
 
+## Indicadores de qualidade
+
+Para cada imóvel não cancelado, `quality` calcula dois sinais de inconsistência do cadastro:
+
+- `overlap_count` e `overlap_share`: com quantos outros imóveis do estado ele divide área, e que
+  parcela da área dele está sobreposta (a soma das interseções com cada vizinho, limitada a 1);
+- `outside_share`: que parcela da área fica fora do município declarado, pela malha municipal do IBGE.
+
+```
+current/
+  quality/state=<UF>.parquet                 property_code, municipality_code e os três indicadores
+  quality-municipalities/state=<UF>.parquet  por município: imóveis com sobreposição acima de 1% e de
+                                             50%, hectares sobrepostos, imóveis e hectares fora do município
+```
+
+As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
+imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma
+falha nele fica no log e não impede a atualização dos dados.
+
 ## Uso
 
 Precisa do [uv](https://docs.astral.sh/uv/); as dependências estão declaradas no próprio script.

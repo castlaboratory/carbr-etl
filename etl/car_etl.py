@@ -17,6 +17,7 @@
     uv run etl/car_etl.py web             # envia a página de consulta (web/) à raiz do bucket
     uv run etl/car_etl.py history         # inicia o histórico com a carga publicada (uma vez)
     uv run etl/car_etl.py backup          # copia o histórico do bucket para data/history-backup/
+    uv run etl/car_etl.py quality PE      # indicadores de qualidade por imóvel de um estado já publicado
 
 Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
 O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
@@ -558,6 +559,130 @@ def history_init(ufs: list[str]) -> None:
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
 
 
+IBGE_MESH = ("https://servicodados.ibge.gov.br/api/v3/malhas/estados/{uf}"
+             "?intrarregiao=municipio&formato=application/vnd.geo%2Bjson&qualidade=maxima")
+
+
+def mesh(uf: str) -> Path | None:
+    """Malha municipal do IBGE do estado, guardada em disco por 30 dias. `None` se a API falhar."""
+    path = ROOT / "mesh" / f"{uf}.geojson"
+    fresh = path.exists() and time.time() - path.stat().st_mtime < 30 * 86400
+    if not fresh:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".part")
+        rc = subprocess.run(["curl", "-sS", "--fail", "--compressed", "-m", "300", "-A", USER_AGENT,
+                             "-o", str(tmp), IBGE_MESH.format(uf=uf)]).returncode
+        try:
+            ok = rc == 0 and len(json.loads(tmp.read_text())["features"]) > 0
+        except Exception:
+            ok = False
+        if ok:
+            tmp.rename(path)
+        else:
+            tmp.unlink(missing_ok=True)
+            log(f"{uf}: malha do IBGE indisponível")
+    return path if path.exists() else None
+
+
+def quality(uf: str) -> None:
+    """Indicadores de qualidade por imóvel: sobreposição com vizinhos e área fora do município.
+
+    Lê os imóveis do que foi gerado localmente ou, se não houver, do bucket. Publica
+    `quality/state=<UF>.parquet` (uma linha por imóvel não cancelado) e
+    `quality-municipalities/state=<UF>.parquet` (o resumo por município). As parcelas são razões
+    entre áreas no mesmo lugar, calculadas direto em graus; `overlap_share` soma as interseções
+    com cada vizinho e é limitada a 1.
+    """
+    import duckdb
+
+    s3, name = bucket()
+    out = ROOT / "release" / uf
+    out.mkdir(parents=True, exist_ok=True)
+    local = out / "properties.parquet"
+    if local.exists():
+        con = duckdb.connect()
+        source = f"read_parquet('{local}')"
+    else:
+        con, url = remote_duck(name)
+        source = f"read_parquet('{url(f'properties/state={uf}/part-0.parquet')}')"
+    con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+    t0 = time.time()
+    con.execute(f"""
+        CREATE TABLE p AS
+        SELECT row_number() OVER () AS rid, property_code, municipality_code, area_ha,
+               CASE WHEN geometry_valid THEN geometry ELSE ST_MakeValid(geometry) END AS g
+        FROM {source} WHERE status <> 'cancelled' AND geometry IS NOT NULL
+    """)
+    # Junção espacial só com ST_Intersects (é o que aciona o índice); o par ordenado vem depois.
+    con.execute("CREATE TABLE cand AS SELECT a.rid AS ar, b.rid AS br FROM p a JOIN p b ON ST_Intersects(a.g, b.g)")
+    con.execute("""
+        CREATE TABLE pairs AS
+        SELECT c.ar, c.br, ST_Area(ST_Intersection(a.g, b.g)) AS inter
+        FROM cand c JOIN p a ON a.rid = c.ar JOIN p b ON b.rid = c.br WHERE c.ar < c.br
+    """)
+    con.execute("""
+        CREATE TABLE overlap AS
+        WITH sides AS (SELECT ar AS rid, inter FROM pairs WHERE inter > 0
+                       UNION ALL SELECT br, inter FROM pairs WHERE inter > 0)
+        SELECT rid, count(*) AS overlap_count, sum(inter) AS inter FROM sides GROUP BY rid
+    """)
+    boundaries = mesh(uf)
+    if boundaries:
+        con.execute(f"""
+            CREATE TABLE m AS
+            SELECT codarea::INTEGER AS municipality_code, ST_MakeValid(geom) AS mg FROM ST_Read('{boundaries}')
+        """)
+        outside = """CASE WHEN m.mg IS NULL THEN NULL
+                          ELSE greatest(0.0, 1.0 - ST_Area(ST_Intersection(p.g::GEOMETRY, m.mg::GEOMETRY))
+                                                   / nullif(ST_Area(p.g), 0)) END"""
+        join = "LEFT JOIN m USING (municipality_code)"
+    else:
+        outside, join = "NULL::DOUBLE", ""
+    quality_file = out / "quality.parquet"
+    con.execute(f"""
+        COPY (
+            SELECT p.property_code, p.municipality_code,
+                   coalesce(o.overlap_count, 0)::INTEGER AS overlap_count,
+                   round(least(1.0, coalesce(o.inter, 0) / nullif(ST_Area(p.g), 0)), 4) AS overlap_share,
+                   round({outside}, 4) AS outside_share
+            FROM p LEFT JOIN overlap o USING (rid) {join}
+            ORDER BY p.municipality_code, p.property_code
+        ) TO '{quality_file}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 8192)
+    """)
+    towns_file = out / "quality_municipalities.parquet"
+    con.execute(f"""
+        COPY (
+            SELECT '{uf}' AS state, q.municipality_code, count(*) AS properties,
+                   count(*) FILTER (q.overlap_share > 0.01) AS overlapping,
+                   count(*) FILTER (q.overlap_share > 0.5) AS overlapping_half,
+                   round(sum(p.area_ha * q.overlap_share), 2) AS overlap_ha,
+                   count(*) FILTER (q.outside_share > 0.5) AS outside_half,
+                   round(sum(p.area_ha * q.outside_share), 2) AS outside_ha
+            FROM '{quality_file}' q JOIN p USING (property_code)
+            GROUP BY ALL ORDER BY q.municipality_code
+        ) TO '{towns_file}' (FORMAT parquet, COMPRESSION zstd)
+    """)
+    n, touching, half, out_half = con.execute(f"""
+        SELECT count(*), count(*) FILTER (overlap_share > 0.01), count(*) FILTER (overlap_share > 0.5),
+               count(*) FILTER (outside_share > 0.5) FROM '{quality_file}'
+    """).fetchone()
+    files = {f"quality/state={uf}.parquet": quality_file,
+             f"quality-municipalities/state={uf}.parquet": towns_file}
+    for key, path in files.items():
+        s3.upload_file(str(path), name, f"current/{key}",
+                       ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+    cat = remote_catalog(s3, name)
+    cat["files"] = sorted([f for f in cat["files"] if f["path"] not in files] + [
+        {"path": key, "bytes": path.stat().st_size, "sha256": sha256(path)} for key, path in files.items()],
+        key=lambda f: f["path"])
+    cat["states"][uf]["quality_of"] = cat["states"][uf].get("downloaded_to")
+    s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
+                  Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
+    log(f"{uf}: qualidade de {n} imóveis em {time.time() - t0:.0f}s; {touching} com sobreposição acima de 1%, "
+        f"{half} acima de 50%, {out_half} com mais da metade fora do município"
+        + ("" if boundaries else " (sem malha do IBGE)"))
+
+
 def backup_history() -> None:
     """Copia para o disco local o que há em `history/` no bucket (os arquivos nunca mudam).
 
@@ -625,6 +750,10 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
             download(uf)
             build(uf)
             publish(uf)
+            try:
+                quality(uf)
+            except Exception as err:
+                log(f"{uf}: indicadores de qualidade FALHARAM — {err}")
             clean(uf)
         except (Exception, SystemExit) as err:  # um estado com problema não derruba a fila
             failed[uf] = str(err)
@@ -640,7 +769,7 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history", "backup"])
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history", "backup", "quality"])
     ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
     a = ap.parse_args()
     ufs = [u.upper() for u in a.uf]
@@ -655,4 +784,5 @@ if __name__ == "__main__":
         if not ufs:
             ap.error("informe a UF")
         for uf in ufs:
-            {"download": download, "build": build, "publish": publish, "clean": clean}[a.step](uf)
+            {"download": download, "build": build, "publish": publish, "clean": clean,
+             "quality": quality}[a.step](uf)
