@@ -38,7 +38,7 @@ WFS = "https://geoserver.car.gov.br/geoserver/sicar/wfs"
 ROOT = Path(__file__).resolve().parent.parent / "data"
 PAGE = 5000
 PAUSE_S = 2
-USER_AGENT = "carbr-etl/0.1 (+https://github.com/StrategicProjects/carbr-etl)"
+USER_AGENT = "carbr-etl/0.1 (+https://github.com/castlaboratory/carbr-etl)"
 # Um estado cuja contagem nova fique abaixo desta fração da publicada não é substituído.
 MIN_RATIO = 0.95
 # Download parcial mais velho que isto é descartado antes de recomeçar (horas).

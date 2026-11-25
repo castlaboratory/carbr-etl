@@ -5,8 +5,8 @@
 
 Republica os imóveis rurais do **Cadastro Ambiental Rural (CAR)** — os dados públicos do Sicar, do
 Serviço Florestal Brasileiro — como GeoParquet num bucket compatível com S3. É a origem dos dados
-dos pacotes [carbr para R](https://github.com/StrategicProjects/carbr-r) e
-[carbr para Python](https://github.com/StrategicProjects/carbr-py).
+dos pacotes [carbr para R](https://github.com/castlaboratory/carbr-r) e
+[carbr para Python](https://github.com/castlaboratory/carbr-py).
 
 ## O que faz
 
