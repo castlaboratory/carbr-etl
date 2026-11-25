@@ -15,6 +15,7 @@
     uv run etl/car_etl.py verify          # confere o bucket contra o catálogo e o Sicar
     uv run etl/car_etl.py summary         # (re)gera o resumo pré-calculado a partir do bucket
     uv run etl/car_etl.py web             # envia a página de consulta (web/) à raiz do bucket
+    uv run etl/car_etl.py history         # inicia o histórico com a carga publicada (uma vez)
 
 Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
 O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
@@ -372,9 +373,19 @@ def publish(uf: str) -> None:
             f"{uf}: {state['properties']} imóveis agora, {previous} publicados; "
             "queda acima do limite, estado não substituído"
         )
+    # Histórico: antes de substituir o estado, compara o que está publicado com o que chegou.
+    date = state["downloaded_to"][:10]
+    published = remote_catalog(s3, name)["states"].get(uf, {}).get("downloaded_to", "")[:10]
+    history = {f"history/summary/date={date}/state={uf}.parquet": out / "summary.parquet"}
+    if published and published != date:
+        write_transitions(name, uf, published, date, out / "properties.parquet", out / "transitions.parquet")
+        history[f"history/transitions/date={date}/state={uf}.parquet"] = out / "transitions.parquet"
     local = {f"properties/state={uf}/part-0.parquet": out / "properties.parquet",
              f"municipalities/state={uf}.parquet": out / "municipalities.parquet",
              f"summary/state={uf}.parquet": out / "summary.parquet"}
+    for key, path in history.items():
+        s3.upload_file(str(path), name, key, ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+        log(f"enviado {key}")
     for key, path in local.items():
         s3.upload_file(str(path), name, f"current/{key}",
                        ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
@@ -394,6 +405,10 @@ def publish(uf: str) -> None:
     cat["version"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
     cat["source"] = SOURCE
     cat["crs"] = "EPSG:4674"
+    dates = cat.setdefault("history", {}).setdefault(uf, [])
+    if date not in dates:
+        dates.append(date)
+        dates.sort()
     s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
     log(f"{uf} no catálogo; {len(cat['states'])} estados publicados, versão {cat['version']}")
@@ -487,6 +502,55 @@ def web(_ufs: list[str]) -> None:
         log(f"enviado {key} ({path.stat().st_size / 1e3:.0f} kB)")
 
 
+def write_transitions(name: str, uf: str, from_date: str, to_date: str, new: Path, dest: Path) -> None:
+    """Fluxo entre duas cargas: quantos imóveis saíram de cada situação e etapa para cada outra.
+
+    O Sicar não informa quando um cadastro muda de etapa; a diferença entre a carga publicada
+    e a nova é o único registro disso. `from_*` nulo é imóvel que entrou; `to_*` nulo, que saiu.
+    """
+    con, url = remote_duck(name)
+    old = url(f"properties/state={uf}/part-0.parquet")
+    columns = "property_code, status, condition, size_class, area_ha"
+    con.execute(f"""
+        COPY (
+            SELECT '{uf}' AS state, DATE '{from_date}' AS from_date, DATE '{to_date}' AS to_date,
+                   o.status AS from_status, n.status AS to_status,
+                   o.condition AS from_condition, n.condition AS to_condition,
+                   coalesce(n.size_class, o.size_class) AS size_class,
+                   count(*) AS properties, sum(coalesce(n.area_ha, o.area_ha)) AS area_ha
+            FROM (SELECT {columns} FROM read_parquet('{old}')) o
+            FULL OUTER JOIN (SELECT {columns} FROM read_parquet('{new}')) n USING (property_code)
+            GROUP BY ALL ORDER BY ALL
+        ) TO '{dest}' (FORMAT parquet, COMPRESSION zstd)
+    """)
+    moved, entered, left = con.execute(f"""
+        SELECT coalesce(sum(properties) FILTER (from_condition IS NOT NULL AND to_condition IS NOT NULL
+                                               AND from_condition <> to_condition), 0),
+               coalesce(sum(properties) FILTER (from_condition IS NULL), 0),
+               coalesce(sum(properties) FILTER (to_condition IS NULL), 0)
+        FROM '{dest}'
+    """).fetchone()
+    log(f"{uf}: de {from_date} a {to_date}, {int(moved)} mudaram de etapa, {int(entered)} entraram, {int(left)} saíram")
+
+
+def history_init(ufs: list[str]) -> None:
+    """Marca a carga publicada como primeiro ponto do histórico dos estados que ainda não têm um."""
+    s3, name = bucket()
+    cat = remote_catalog(s3, name)
+    for uf in ufs or list(cat["states"]):
+        dates = cat.setdefault("history", {}).setdefault(uf, [])
+        date = cat["states"][uf].get("downloaded_to", "")[:10]
+        if dates or not date:
+            continue
+        key = f"history/summary/date={date}/state={uf}.parquet"
+        s3.copy_object(Bucket=name, Key=key, ContentType="application/vnd.apache.parquet", MetadataDirective="REPLACE",
+                       CopySource={"Bucket": name, "Key": f"current/summary/state={uf}.parquet"})
+        dates.append(date)
+        log(f"{uf}: histórico iniciado em {date}")
+    s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
+                  Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
+
+
 def clean(uf: str) -> None:
     """Apaga os dados locais de um estado (brutos e gerados)."""
     for d in (ROOT / "raw" / uf.lower(), ROOT / "release" / uf):
@@ -529,14 +593,14 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web"])
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history"])
     ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
     a = ap.parse_args()
     ufs = [u.upper() for u in a.uf]
     if a.step == "refresh":
         run_all(ufs, refresh=True)
-    elif a.step in ("all", "verify", "summary", "web"):
-        {"all": run_all, "verify": verify, "summary": summary, "web": web}[a.step](ufs)
+    elif a.step in ("all", "verify", "summary", "web", "history"):
+        {"all": run_all, "verify": verify, "summary": summary, "web": web, "history": history_init}[a.step](ufs)
     else:
         if not ufs:
             ap.error("informe a UF")

@@ -31,6 +31,22 @@ current/
   summary/state=<UF>.parquet            resumo pré-calculado
 ```
 
+## Histórico
+
+O Sicar não informa quando um cadastro muda de situação ou de etapa da análise. A cada atualização, antes
+de substituir um estado, o ETL compara a carga publicada com a nova e guarda, fora de `current/`:
+
+```
+history/
+  summary/date=<AAAA-MM-DD>/state=<UF>.parquet      o resumo daquela carga (mesmo formato de summary/)
+  transitions/date=<AAAA-MM-DD>/state=<UF>.parquet  o fluxo desde a carga anterior
+```
+
+O arquivo de fluxo traz, por estado, quantos imóveis (e que área) passaram de cada situação e etapa para
+cada outra: `from_date`, `to_date`, `from_status`, `to_status`, `from_condition`, `to_condition`,
+`size_class`, `properties`, `area_ha`. `from_*` nulo é imóvel que entrou no cadastro; `to_*` nulo, que saiu.
+As datas de cada estado ficam em `history` no `catalog.json`. A série começa em 25/11/2026.
+
 ## Uso
 
 Precisa do [uv](https://docs.astral.sh/uv/); as dependências estão declaradas no próprio script.
