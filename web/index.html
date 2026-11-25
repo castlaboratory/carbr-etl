@@ -47,7 +47,21 @@
     min-width: 0; flex: 1; padding: .55rem .65rem; background: #fff;
     border: 1.5px solid var(--ink); border-radius: 2px;
   }
-  select { flex: 0 0 5.2rem; }
+  .combo { position: relative; flex: 1; min-width: 0; display: flex; }
+  .combo.narrow { flex: 0 0 4.6rem; }
+  .combo.narrow input { text-transform: uppercase; }
+  .combo ul {
+    position: absolute; z-index: 5; top: calc(100% - 1.5px); left: 0; min-width: 100%; width: max-content; max-width: 22rem;
+    max-height: 16rem; overflow-y: auto; margin: 0; padding: 0; list-style: none;
+    background: #fff; border: 1.5px solid var(--ink); border-radius: 2px;
+  }
+  .combo ul[hidden] { display: none; }
+  .combo li { padding: .5rem .65rem; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .combo li:last-child { border-bottom: 0; }
+  .combo li:hover { background: var(--wash); }
+  .combo li[aria-selected="true"] { background: var(--ink); color: var(--paper); }
+  .combo li.none { color: var(--muted); cursor: default; }
+  .combo li.none:hover { background: none; }
   button {
     padding: .55rem .9rem; border: 1.5px solid var(--ink); border-radius: 2px;
     background: var(--ink); color: var(--paper); font-weight: 600; cursor: pointer; white-space: nowrap;
@@ -147,9 +161,16 @@
   <form id="by-place">
     <label for="town">Município</label>
     <div class="row">
-      <select id="state" aria-label="Estado"><option value="">UF</option></select>
-      <input id="town" name="town" list="towns" autocomplete="off" placeholder="Escolha o estado">
-      <datalist id="towns"></datalist>
+      <div class="combo narrow">
+        <input id="state" role="combobox" aria-label="Estado" aria-expanded="false" aria-controls="state-list"
+               aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="UF" maxlength="2">
+        <ul id="state-list" role="listbox" aria-label="Estados" hidden></ul>
+      </div>
+      <div class="combo">
+        <input id="town" name="town" role="combobox" aria-expanded="false" aria-controls="town-list"
+               aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Escolha o estado">
+        <ul id="town-list" role="listbox" aria-label="Municípios" hidden></ul>
+      </div>
       <button type="submit" class="quiet">Ir</button>
     </div>
   </form>
@@ -533,17 +554,72 @@ $("by-code").addEventListener("submit", (event) => {
 });
 
 // ---- Município ----
-$("state").addEventListener("change", () => {
-  const uf = $("state").value;
-  $("towns").replaceChildren(...towns.filter((t) => t.state === uf).map((t) => new Option(t.municipality)));
-  $("town").value = "";
-  $("town").placeholder = uf ? "Nome do município" : "Escolha o estado";
-});
+const STATE_NAMES = { AC: "Acre", AL: "Alagoas", AM: "Amazonas", AP: "Amapá", BA: "Bahia", CE: "Ceará", DF: "Distrito Federal",
+  ES: "Espírito Santo", GO: "Goiás", MA: "Maranhão", MG: "Minas Gerais", MS: "Mato Grosso do Sul", MT: "Mato Grosso",
+  PA: "Pará", PB: "Paraíba", PE: "Pernambuco", PI: "Piauí", PR: "Paraná", RJ: "Rio de Janeiro", RN: "Rio Grande do Norte",
+  RO: "Rondônia", RR: "Roraima", RS: "Rio Grande do Sul", SC: "Santa Catarina", SE: "Sergipe", SP: "São Paulo", TO: "Tocantins" };
 const fold = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+// Caixa de escolha com lista própria (o menu nativo do navegador não aceita o estilo da página).
+function combo(input, list, options, onPick) {
+  let active = -1;
+  let shown = [];
+  const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
+  const mark = (i) => {
+    active = i;
+    [...list.children].forEach((li, k) => li.setAttribute("aria-selected", String(k === i)));
+    if (i >= 0) { input.setAttribute("aria-activedescendant", list.children[i].id); list.children[i].scrollIntoView({ block: "nearest" }); }
+  };
+  const pick = (option) => { input.value = option.value; close(); onPick?.(option); };
+  const open = () => {
+    shown = options(input.value);
+    list.replaceChildren(...shown.map((option, i) => {
+      const li = document.createElement("li");
+      li.id = `${list.id}-${i}`; li.setAttribute("role", "option"); li.textContent = option.label;
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); pick(option); });
+      return li;
+    }));
+    if (shown.length === 0) {
+      const li = document.createElement("li");
+      li.className = "none"; li.textContent = "Nada encontrado";
+      list.append(li);
+    }
+    list.hidden = false; input.setAttribute("aria-expanded", "true"); active = -1;
+  };
+  input.addEventListener("focus", open);
+  input.addEventListener("input", open);
+  input.addEventListener("blur", close);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (list.hidden) open();
+      if (shown.length) mark((active + (e.key === "ArrowDown" ? 1 : shown.length - 1) + (active < 0 && e.key === "ArrowUp" ? 1 : 0)) % shown.length);
+    } else if (e.key === "Enter" && !list.hidden && active >= 0) {
+      e.preventDefault(); pick(shown[active]);
+    } else if (e.key === "Escape") {
+      close();
+    }
+  });
+}
+
+combo($("state"), $("state-list"),
+  (typed) => Object.keys(catalog?.states ?? {})
+    .filter((uf) => fold(uf).startsWith(fold(typed)) || fold(STATE_NAMES[uf] ?? "").startsWith(fold(typed)))
+    .map((uf) => ({ value: uf, label: `${uf}  ${STATE_NAMES[uf] ?? ""}` })),
+  () => { $("town").value = ""; $("town").placeholder = "Nome do município"; $("town").focus(); });
+combo($("town"), $("town-list"),
+  (typed) => {
+    const uf = $("state").value.toUpperCase();
+    return towns.filter((t) => t.state === uf && fold(t.municipality).includes(fold(typed)))
+      .sort((a, b) => fold(b.municipality).startsWith(fold(typed)) - fold(a.municipality).startsWith(fold(typed))
+        || a.municipality.localeCompare(b.municipality, "pt"))
+      .slice(0, 60).map((t) => ({ value: t.municipality, label: t.municipality }));
+  });
+
 $("by-place").addEventListener("submit", (event) => {
   event.preventDefault();
   if (running) return;
-  const uf = $("state").value;
+  const uf = $("state").value.toUpperCase();
   const town = towns.find((t) => t.state === uf && fold(t.municipality) === fold($("town").value));
   if (!town) { say("Escolha o estado e um município da lista.", "error"); return; }
   pin?.remove();
@@ -566,7 +642,6 @@ async function start() {
   catalog = await (await fetch(BASE + "catalog.json", { cache: "no-cache" })).json();
   const states = Object.keys(catalog.states);
   $("version").textContent = catalog.version.split("-").reverse().join("/");
-  $("state").append(...states.map((uf) => new Option(uf, uf)));
   const total = states.reduce((sum, uf) => sum + catalog.states[uf].properties, 0);
   say(`${int.format(total)} imóveis de ${states.length} estados prontos para consulta.`);
 
