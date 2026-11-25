@@ -18,6 +18,7 @@
     uv run etl/car_etl.py history         # inicia o histórico com a carga publicada (uma vez)
     uv run etl/car_etl.py backup          # copia o histórico do bucket para data/history-backup/
     uv run etl/car_etl.py quality PE      # indicadores de qualidade por imóvel de um estado já publicado
+    uv run etl/car_etl.py typology        # tipologia dos municípios do país, a partir do bucket
 
 Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
 O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
@@ -726,13 +727,31 @@ def protected() -> Path | None:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
     con.execute(f"""
-        COPY (SELECT row_number() OVER () AS aid, kind, name, category, ST_MakeValid(geom)::GEOMETRY AS g
-              FROM ({' UNION ALL '.join(parts)}) WHERE geom IS NOT NULL)
-        TO '{out}' (FORMAT parquet, COMPRESSION zstd)
+        CREATE TABLE area AS
+        SELECT row_number() OVER () AS aid, kind, name, category, ST_MakeValid(geom)::GEOMETRY AS g
+        FROM ({' UNION ALL '.join(parts)}) WHERE geom IS NOT NULL
     """)
+    # Há áreas com centenas de milhares de vértices, e cruzar cada imóvel com o polígono inteiro
+    # não termina. As grandes são recortadas numa grade: cada cruzamento vê só um pedaço pequeno.
+    # Várias linhas passam a ter o mesmo `aid`.
+    cell = 0.2
+    con.execute(f"""
+        CREATE TABLE piece AS
+        WITH big AS (SELECT *, ST_XMin(g) AS x0, ST_XMax(g) AS x1, ST_YMin(g) AS y0, ST_YMax(g) AS y1
+                     FROM area WHERE ST_NPoints(g) > 2000),
+             cols AS (SELECT *, unnest(generate_series(floor(x0 / {cell})::INT, floor(x1 / {cell})::INT)) AS i FROM big),
+             cells AS (SELECT *, unnest(generate_series(floor(y0 / {cell})::INT, floor(y1 / {cell})::INT)) AS j FROM cols),
+             cut AS (SELECT aid, kind, name, category,
+                            ST_Intersection(g, ST_MakeEnvelope(i * {cell}, j * {cell}, (i + 1) * {cell}, (j + 1) * {cell})) AS g
+                     FROM cells)
+        SELECT * FROM cut WHERE NOT ST_IsEmpty(g) AND ST_Area(g) > 0
+        UNION ALL SELECT aid, kind, name, category, g FROM area WHERE ST_NPoints(g) <= 2000
+    """)
+    con.execute(f"COPY (SELECT * FROM piece ORDER BY aid) TO '{out}' (FORMAT parquet, COMPRESSION zstd)")
     meta.write_text(json.dumps(info, indent=2, ensure_ascii=False))
-    counts = dict(con.execute(f"SELECT kind, count(*) FROM '{out}' GROUP BY 1").fetchall())
-    log(f"áreas protegidas: {counts}")
+    counts = dict(con.execute("SELECT kind, count(*) FROM area GROUP BY 1").fetchall())
+    pieces, biggest = con.execute(f"SELECT count(*), max(ST_NPoints(g)) FROM '{out}'").fetchone()
+    log(f"áreas protegidas: {counts}, em {pieces} pedaços de até {biggest} vértices")
     return out
 
 
@@ -805,11 +824,17 @@ def quality(uf: str) -> None:
             SELECT h.rid, a.kind, a.name, a.category, ST_Intersection(pu.g, a.ag) AS ig, ST_Area(pu.g) AS area
             FROM hit h JOIN pu ON pu.rid = h.rid JOIN a ON a.aid = h.aid
         """)
+        # A parcela é a união das interseções; o nome, o da área que soma mais (uma área pode vir
+        # em vários pedaços).
         con.execute("""
             CREATE TABLE shares AS
-            SELECT rid, kind, least(1.0, ST_Area(ST_Union_Agg(ig)) / nullif(any_value(area), 0)) AS share,
-                   arg_max(name, ST_Area(ig)) AS name, arg_max(category, ST_Area(ig)) AS category
-            FROM cut WHERE ST_Area(ig) > 0 GROUP BY rid, kind
+            WITH whole AS (SELECT rid, kind, least(1.0, ST_Area(ST_Union_Agg(ig)) / nullif(any_value(area), 0)) AS share
+                           FROM cut WHERE ST_Area(ig) > 0 GROUP BY rid, kind),
+                 named AS (SELECT rid, kind, name, any_value(category) AS category, sum(ST_Area(ig)) AS inside
+                           FROM cut WHERE ST_Area(ig) > 0 GROUP BY rid, kind, name),
+                 main AS (SELECT rid, kind, arg_max(name, inside) AS name, arg_max(category, inside) AS category
+                          FROM named GROUP BY rid, kind)
+            SELECT w.rid, w.kind, w.share, m.name, m.category FROM whole w JOIN main m USING (rid, kind)
         """)
     else:
         con.execute("""CREATE TABLE shares (rid BIGINT, kind VARCHAR, share DOUBLE, name VARCHAR, category VARCHAR)""")
@@ -879,6 +904,108 @@ def quality(uf: str) -> None:
         f"{half} acima de 50%, {out_half} com mais da metade fora do município; {in_ti} em terra indígena, "
         f"{in_pi} em proteção integral, {in_us} em uso sustentável"
         + ("" if boundaries else " (sem malha do IBGE)"))
+
+
+TYPOLOGY = Path(__file__).resolve().parent / "typology.json"
+FEW = {"code": "few", "label": "Poucos cadastros",
+       "description": "Menos de 30 imóveis não cancelados: pouco para caracterizar o município."}
+
+
+def typology(_ufs: list[str] | None = None) -> None:
+    """Tipologia dos municípios: cada um vai para o grupo de centro mais próximo.
+
+    O perfil de cada município (porte, etapas da análise, sobreposição e cobertura do território)
+    é calculado com o que está publicado no bucket. Os grupos vêm da referência fixa em
+    `etl/typology.json` (ajustada por `etl/typology_fit.py`): nada é reajustado aqui, para que um
+    grupo signifique a mesma coisa em todas as semanas. Publica `typology/municipalities.parquet`,
+    guarda uma cópia datada em `history/typology/` e descreve os grupos no catálogo.
+    """
+    s3, name = bucket()
+    cat = remote_catalog(s3, name)
+    ref = json.loads(TYPOLOGY.read_text())
+    features, floor = ref["features"], ref["min_properties"]
+    con, url = remote_duck(name)
+    con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+    con.execute("""CREATE TABLE town (state VARCHAR, municipality_code INTEGER, municipality VARCHAR,
+        properties BIGINT, area_ha DOUBLE, small BIGINT, large_ha DOUBLE, waiting BIGINT, notified BIGINT,
+        analysed BIGINT)""")
+    con.execute("CREATE TABLE territory (municipality_code INTEGER, territory_ha DOUBLE)")
+    t0 = time.time()
+    states = sorted(cat["states"])
+    for uf in states:
+        con.execute(f"""
+            INSERT INTO town
+            SELECT '{uf}', municipality_code, any_value(municipality), count(*), sum(area_ha),
+                   count(*) FILTER (size_class = 'small'), coalesce(sum(area_ha) FILTER (size_class = 'large'), 0),
+                   count(*) FILTER (condition = 'Aguardando análise'),
+                   count(*) FILTER (condition LIKE '%aguardando atendimento a notificação%'),
+                   count(*) FILTER (condition <> 'Aguardando análise' AND condition NOT LIKE 'Cancelado%'
+                                    AND condition NOT LIKE '%aguardando atendimento a notificação%')
+            FROM read_parquet('{url(f'properties/state={uf}/part-0.parquet')}')
+            WHERE status <> 'cancelled' GROUP BY municipality_code
+        """)
+        boundaries = mesh(uf)
+        if boundaries:
+            # Área na superfície da Terra; a função espera latitude antes de longitude.
+            con.execute(f"""INSERT INTO territory SELECT codarea::INTEGER,
+                ST_Area_Spheroid(ST_FlipCoordinates(ST_MakeValid(geom)::GEOMETRY)) / 1e4 FROM ST_Read('{boundaries}')""")
+    quality_files = [url(f"quality-municipalities/state={uf}.parquet") for uf in states
+                     if any(f["path"] == f"quality-municipalities/state={uf}.parquet" for f in cat["files"])]
+    con.execute(f"""
+        CREATE TABLE profile AS
+        SELECT t.state, t.municipality_code, t.municipality, t.properties,
+               round(t.small / t.properties, 4) AS small_share,
+               round(least(1.0, t.large_ha / nullif(t.area_ha, 0)), 4) AS large_area_share,
+               round(t.waiting / t.properties, 4) AS waiting_share,
+               round(t.notified / t.properties, 4) AS notified_share,
+               round(t.analysed / t.properties, 4) AS analysed_share,
+               round(q.overlapping_half / nullif(q.properties, 0), 4) AS overlap_share,
+               round(least(2.0, t.area_ha / nullif(r.territory_ha, 0)), 4) AS coverage
+        FROM town t LEFT JOIN territory r USING (municipality_code)
+             LEFT JOIN read_parquet({quality_files}, union_by_name = true) q USING (municipality_code)
+    """)
+    rows = con.execute(f"SELECT municipality_code, properties, {', '.join(features)} FROM profile").fetchall()
+    assigned = []
+    for code, n, *values in rows:
+        if n < floor or any(v is None for v in values):
+            assigned.append((code, FEW["code"]))
+            continue
+        z = [max(-3.0, min(3.0, (v - ref["mean"][f]) / ref["std"][f])) for f, v in zip(features, values)]
+        best = min(ref["groups"], key=lambda g: sum((a - g["center"][f]) ** 2 for f, a in zip(features, z)))
+        assigned.append((code, best["code"]))
+    con.execute("CREATE TABLE assigned (municipality_code INTEGER, typology VARCHAR)")
+    con.executemany("INSERT INTO assigned VALUES (?, ?)", assigned)
+    groups = [*ref["groups"], FEW]
+    con.execute("CREATE TABLE label (typology VARCHAR, typology_label VARCHAR)")
+    con.executemany("INSERT INTO label VALUES (?, ?)", [(g["code"], g["label"]) for g in groups])
+    out = ROOT / "typology"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "municipalities.parquet"
+    con.execute(f"""
+        COPY (SELECT p.state, p.municipality_code, p.municipality, a.typology, l.typology_label,
+                     p.* EXCLUDE (state, municipality_code, municipality)
+              FROM profile p JOIN assigned a USING (municipality_code) JOIN label l USING (typology)
+              ORDER BY p.municipality_code)
+        TO '{path}' (FORMAT parquet, COMPRESSION zstd)
+    """)
+    counts = dict(con.execute(f"SELECT typology, count(*) FROM '{path}' GROUP BY 1").fetchall())
+    totals = dict(con.execute(f"SELECT typology, sum(properties) FROM '{path}' GROUP BY 1").fetchall())
+    key = "typology/municipalities.parquet"
+    s3.upload_file(str(path), name, f"current/{key}", ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+    cat = remote_catalog(s3, name)
+    s3.upload_file(str(path), name, f"history/typology/date={cat['version']}.parquet",
+                   ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+    cat["files"] = sorted([f for f in cat["files"] if f["path"] != key] + [
+        {"path": key, "bytes": path.stat().st_size, "sha256": sha256(path)}], key=lambda f: f["path"])
+    cat["typology"] = {
+        "of": cat["version"], "fitted": ref["fitted"], "min_properties": floor, "features": features,
+        "groups": [{"code": g["code"], "label": g["label"], "description": g["description"],
+                    "municipalities": counts.get(g["code"], 0), "properties": int(totals.get(g["code"], 0))}
+                   for g in groups],
+    }
+    s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
+                  Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
+    log(f"tipologia de {len(assigned)} municípios em {time.time() - t0:.0f}s: {counts}")
 
 
 def backup_history() -> None:
@@ -958,6 +1085,10 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
             log(f"{uf}: FALHOU — {err}")
     log(f"fila concluída: {len(todo) - len(failed)} de {len(todo)} estados publicados")
     try:
+        typology()
+    except Exception as err:  # a tipologia não invalida a rodada
+        log(f"tipologia FALHOU — {err}")
+    try:
         backup_history()
     except Exception as err:  # a cópia de segurança não invalida a rodada
         log(f"histórico: cópia de segurança FALHOU — {err}")
@@ -967,7 +1098,7 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history", "backup", "quality"])
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web", "history", "backup", "quality", "typology"])
     ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
     a = ap.parse_args()
     ufs = [u.upper() for u in a.uf]
@@ -976,8 +1107,9 @@ if __name__ == "__main__":
         run_all(ufs, refresh=True)
     elif a.step == "backup":
         backup_history()
-    elif a.step in ("all", "verify", "summary", "web", "history"):
-        {"all": run_all, "verify": verify, "summary": summary, "web": web, "history": history_init}[a.step](ufs)
+    elif a.step in ("all", "verify", "summary", "web", "history", "typology"):
+        {"all": run_all, "verify": verify, "summary": summary, "web": web, "history": history_init,
+         "typology": typology}[a.step](ufs)
     else:
         if not ufs:
             ap.error("informe a UF")

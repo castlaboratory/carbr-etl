@@ -1,0 +1,103 @@
+{
+  "fitted": "2026-11-25",
+  "min_properties": 30,
+  "features": [
+    "small_share",
+    "large_area_share",
+    "waiting_share",
+    "notified_share",
+    "analysed_share",
+    "overlap_share",
+    "coverage"
+  ],
+  "mean": {
+    "small_share": 0.912614,
+    "large_area_share": 0.253671,
+    "waiting_share": 0.67302,
+    "notified_share": 0.163519,
+    "analysed_share": 0.163459,
+    "overlap_share": 0.235366,
+    "coverage": 0.890756
+  },
+  "std": {
+    "small_share": 0.10219,
+    "large_area_share": 0.227062,
+    "waiting_share": 0.324299,
+    "notified_share": 0.206972,
+    "analysed_share": 0.196912,
+    "overlap_share": 0.171421,
+    "coverage": 0.237616
+  },
+  "groups": [
+    {
+      "code": "small_waiting",
+      "label": "Pequenos imóveis à espera de análise",
+      "description": "Quase só imóveis pequenos, e a grande maioria ainda aguarda a análise.",
+      "center": {
+        "small_share": 0.4578,
+        "large_area_share": -0.5531,
+        "waiting_share": 0.7479,
+        "notified_share": -0.5864,
+        "analysed_share": -0.6154,
+        "overlap_share": -0.3407,
+        "coverage": -0.2345
+      }
+    },
+    {
+      "code": "analysed",
+      "label": "Análise avançada",
+      "description": "Boa parte dos cadastros já foi analisada ou está em análise.",
+      "center": {
+        "small_share": -0.0997,
+        "large_area_share": 0.1317,
+        "waiting_share": -1.1184,
+        "notified_share": 0.1057,
+        "analysed_share": 1.7169,
+        "overlap_share": -0.5707,
+        "coverage": 0.077
+      }
+    },
+    {
+      "code": "large_waiting",
+      "label": "Grandes imóveis à espera de análise",
+      "description": "A maior parte da área declarada está em imóveis grandes, e a análise mal começou.",
+      "center": {
+        "small_share": -1.617,
+        "large_area_share": 1.3557,
+        "waiting_share": -0.0001,
+        "notified_share": 0.1285,
+        "analysed_share": -0.135,
+        "overlap_share": -0.162,
+        "coverage": 0.2544
+      }
+    },
+    {
+      "code": "notified",
+      "label": "Notificados sem resposta",
+      "description": "A análise andou, mas a maioria dos cadastros espera a resposta do declarante.",
+      "center": {
+        "small_share": 0.3275,
+        "large_area_share": -0.101,
+        "waiting_share": -1.4292,
+        "notified_share": 1.9537,
+        "analysed_share": 0.2707,
+        "overlap_share": 0.5563,
+        "coverage": -0.3591
+      }
+    },
+    {
+      "code": "overlapping",
+      "label": "Muita sobreposição",
+      "description": "Mais da metade dos imóveis tem a maior parte da área dentro de outros cadastros.",
+      "center": {
+        "small_share": 0.2788,
+        "large_area_share": 0.3259,
+        "waiting_share": 0.5588,
+        "notified_share": -0.4059,
+        "analysed_share": -0.4936,
+        "overlap_share": 1.7722,
+        "coverage": 0.8332
+      }
+    }
+  ]
+}
