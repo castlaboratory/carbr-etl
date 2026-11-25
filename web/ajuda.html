@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entenda o CAR — ajuda da consulta ao Cadastro Ambiental Rural</title>
+<meta name="description" content="O que é o Cadastro Ambiental Rural, o que significa cada situação e cada etapa da análise, perguntas frequentes, dicionário de dados e a legislação.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14301f; --paper: #fbfcf8; --line: #cdd6c9; --muted: #4f6155;
+    --alert: #c2410c; --ok: #256f36; --water: #1a5f7a; --wash: #eef2ea;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
+  body { margin: 0; font-family: "Archivo", system-ui, sans-serif; font-size: 1.0625rem; line-height: 1.55; color: var(--ink); background: var(--paper); }
+  a { color: var(--water); }
+  :focus-visible { outline: 3px solid var(--water); outline-offset: 2px; }
+  h1, h2, h3, p, ul, ol, dl { margin: 0; }
+
+  .bar { position: sticky; top: 0; z-index: 5; background: var(--ink); color: var(--paper); }
+  .bar nav { max-width: 62rem; margin: 0 auto; padding: .7rem 1.5rem; display: flex; gap: .4rem 1.4rem; flex-wrap: wrap; align-items: baseline; }
+  .bar a { color: var(--paper); text-decoration: none; font-stretch: 85%; }
+  .bar a:hover { text-decoration: underline; }
+  .bar .home { font-weight: 750; margin-right: auto; }
+
+  header.top { max-width: 62rem; margin: 0 auto; padding: 3rem 1.5rem 2rem; }
+  header.top h1 { font-size: clamp(2.4rem, 6vw, 4rem); line-height: 1; font-weight: 800; font-stretch: 68%; max-width: 16ch; }
+  header.top p { margin-top: 1rem; max-width: 56ch; color: var(--muted); font-size: 1.15rem; }
+
+  main { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem 4rem; }
+  section { padding-block: 2.2rem; border-top: 1.5px solid var(--ink); display: grid; grid-template-columns: 15rem 1fr; gap: 1rem 2.5rem; }
+  section > h2 { font-size: 1.55rem; line-height: 1.1; font-stretch: 75%; font-weight: 750; }
+  section > div > * + * { margin-top: .9rem; }
+  section p, section li { max-width: 62ch; }
+  ul, ol { padding-left: 1.2rem; }
+  li + li { margin-top: .35rem; }
+
+  /* Situações e etapas: a mesma ficha da consulta. */
+  .cards { display: grid; gap: .75rem; }
+  .card { border: 1.5px solid var(--ink); background: #fff; display: grid; grid-template-columns: 1fr auto; }
+  .card h3 { grid-column: 1; padding: .6rem .9rem .1rem; font-size: 1.15rem; font-stretch: 78%; font-weight: 750; border-left: .6rem solid var(--stage, var(--line)); }
+  .card p { grid-column: 1; padding: 0 .9rem .7rem; border-left: .6rem solid var(--stage, var(--line)); }
+  .card .sicar { color: var(--muted); font-size: .92rem; }
+  .card .count { grid-column: 2; grid-row: 1 / span 3; align-self: center; padding: 0 1rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .card .count b { display: block; font-size: 1.35rem; font-stretch: 70%; font-weight: 800; line-height: 1.1; }
+  .card .count span { color: var(--muted); font-size: .85rem; }
+
+  details { border-bottom: 1px solid var(--line); }
+  details:first-of-type { border-top: 1px solid var(--line); }
+  summary { cursor: pointer; padding: .8rem 0; font-weight: 650; list-style-position: outside; margin-left: 1.1rem; }
+  summary:hover { color: var(--water); }
+  details > div { padding: 0 0 1rem 1.1rem; }
+  details > div > * + * { margin-top: .7rem; }
+  section > div > details + details { margin-top: 0; }
+
+  .table { overflow-x: auto; border: 1.5px solid var(--ink); background: #fff; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: .5rem .8rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--wash); font-weight: 650; border-bottom: 1.5px solid var(--ink); }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { font-weight: 650; white-space: nowrap; }
+  code { font-family: inherit; font-stretch: 85%; background: var(--wash); padding: .05rem .3rem; }
+  pre { background: #fff; border: 1.5px solid var(--ink); padding: .8rem 1rem; overflow-x: auto; font-size: .92rem; line-height: 1.45; }
+  pre code { background: none; padding: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-stretch: normal; }
+  .law li { list-style: none; margin-left: -1.2rem; padding: .7rem 0; border-bottom: 1px solid var(--line); }
+  .law li:first-child { border-top: 1px solid var(--line); }
+  .law b { display: block; }
+  .note { background: var(--wash); border-left: .6rem solid var(--ink); padding: .8rem 1rem; }
+  footer { border-top: 1.5px solid var(--ink); max-width: 62rem; margin: 0 auto; padding: 1.5rem; color: var(--muted); font-size: .92rem; }
+
+  @media (max-width: 48rem) {
+    section { grid-template-columns: 1fr; gap: .9rem; }
+    .card { grid-template-columns: 1fr; }
+    .card .count { grid-column: 1; grid-row: auto; text-align: left; padding: 0 .9rem .7rem; border-left: .6rem solid var(--stage, var(--line)); }
+    .card .count b { display: inline; font-size: 1.1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <nav aria-label="Seções">
+    <a class="home" href="index.html">Consulta ao CAR</a>
+    <a href="#o-que-e">O que é</a>
+    <a href="#situacoes">Situações</a>
+    <a href="#etapas">Etapas da análise</a>
+    <a href="#perguntas">Perguntas</a>
+    <a href="#usar">Como usar os dados</a>
+    <a href="#dicionario">Dicionário</a>
+    <a href="#legislacao">Legislação</a>
+  </nav>
+</div>
+
+<header class="top">
+  <h1>Entenda o que o cadastro diz</h1>
+  <p>O que é o Cadastro Ambiental Rural, o que significa cada palavra que aparece na ficha de um imóvel e como usar os dados públicos, da consulta no mapa à análise em R ou Python.</p>
+</header>
+
+<main>
+
+<section id="o-que-e">
+  <h2>O que é o CAR</h2>
+  <div>
+    <p>O Cadastro Ambiental Rural é o registro público eletrônico, de alcance nacional, de todos os imóveis rurais do país. Foi criado pelo Código Florestal, em 2012, e é obrigatório. Nele o proprietário ou possuidor declara o perímetro do imóvel e as áreas que a lei protege, como a reserva legal e as áreas de preservação permanente.</p>
+    <p>Quem declara é o próprio responsável pelo imóvel. Depois, o órgão ambiental do estado analisa o cadastro, aponta o que precisa ser corrigido e, quando tudo está certo, conclui a análise. O sistema que guarda os cadastros de todos os estados é o Sicar, mantido pelo Serviço Florestal Brasileiro.</p>
+    <p class="note">Constar no CAR não prova que a terra é de quem declarou. A lei diz que o cadastro não vale como título de propriedade nem de posse (Código Florestal, art. 29, § 2º).</p>
+  </div>
+</section>
+
+<section id="situacoes">
+  <h2>Situação do cadastro</h2>
+  <div>
+    <p>A situação diz se o cadastro está valendo. Aparece na ficha de cada imóvel.</p>
+    <div class="table"><table>
+      <thead><tr><th>Situação</th><th>O que quer dizer</th></tr></thead>
+      <tbody>
+        <tr><td>Ativo</td><td>O cadastro está valendo. É a situação de quase todos os imóveis, analisados ou não.</td></tr>
+        <tr><td>Pendente</td><td>Há algo a resolver: uma notificação sem resposta, uma sobreposição ou outra pendência apontada pelo sistema ou pela análise.</td></tr>
+        <tr><td>Suspenso</td><td>O cadastro foi suspenso e não vale enquanto durar a suspensão.</td></tr>
+        <tr><td>Cancelado</td><td>O cadastro deixou de valer, por decisão administrativa ou judicial, por duplicidade ou a pedido de quem declarou.</td></tr>
+      </tbody>
+    </table></div>
+    <p>As descrições acima são um resumo em linguagem simples, feito por nós. A regra de cada situação está nas normas do Ministério do Meio Ambiente e de cada estado.</p>
+  </div>
+</section>
+
+<section id="etapas">
+  <h2>Etapas da análise</h2>
+  <div>
+    <p>O Sicar informa a etapa de cada cadastro com quinze textos diferentes. Na consulta, eles aparecem agrupados nestas seis etapas, com as mesmas cores do mapa. Os números são do país inteiro e vêm da publicação atual.</p>
+    <div class="cards" id="stages" aria-live="polite">
+      <p>Somando os estados…</p>
+    </div>
+  </div>
+</section>
+
+<section id="perguntas">
+  <h2>Perguntas frequentes</h2>
+  <div>
+    <details>
+      <summary>Por que dois cadastros aparecem no mesmo lugar?</summary>
+      <div><p>Porque cada pessoa desenha o próprio perímetro, e ninguém confere os desenhos na hora do cadastro. Quando dois perímetros se cruzam, há uma sobreposição. Ela pode ser um erro de desenho, uma divisa mal definida ou uma disputa de fato. Quem resolve é a análise do órgão ambiental.</p></div>
+    </details>
+    <details>
+      <summary>O que é módulo fiscal? E imóvel pequeno?</summary>
+      <div><p>Módulo fiscal é uma medida em hectares que o Incra define para cada município; varia de 5 a 110 hectares. O Código Florestal chama de pequeno o imóvel com até 4 módulos fiscais, e dá a ele um tratamento mais simples.</p>
+      <p>Um cuidado: assentamentos da reforma agrária e territórios de povos e comunidades tradicionais têm um cadastro só para muitas famílias. Por isso um perímetro de milhares de hectares pode aparecer como "pequeno".</p></div>
+    </details>
+    <details>
+      <summary>Fui notificado. O que isso quer dizer?</summary>
+      <div><p>Quer dizer que o órgão ambiental do seu estado analisou o cadastro e pediu alguma correção ou documento. Enquanto a resposta não chega, o cadastro fica parado nessa etapa, e isso pode pesar na hora de pedir crédito rural.</p>
+      <p>A resposta é dada no próprio Sicar, pela Central do Proprietário/Possuidor, ou no órgão ambiental do estado. Sindicatos rurais, cooperativas e técnicos de assistência costumam ajudar.</p></div>
+    </details>
+    <details>
+      <summary>Os dados mostram o nome do dono?</summary>
+      <div><p>Não. Esta página só traz o que o Sicar publica para todos: o perímetro declarado e dez informações do imóvel, como situação, etapa da análise, área e município. Nome, CPF, CNPJ e endereço são sigilosos por norma e não estão aqui.</p></div>
+    </details>
+    <details>
+      <summary>De quando são os dados?</summary>
+      <div><p>A base é copiada do Sicar toda semana. A data da cópia aparece no rodapé da consulta. Um cadastro feito ou alterado depois dela só aparece na atualização seguinte.</p></div>
+    </details>
+    <details>
+      <summary>Encontrei um erro. O que faço?</summary>
+      <div><p>Se o erro é no cadastro, como um perímetro no lugar errado, a correção é uma retificação, feita por quem declarou, no Sicar. Se o que aparece aqui é diferente do que o Sicar mostra hoje, vale o Sicar: esta página é uma cópia, atualizada toda semana.</p></div>
+    </details>
+    <details>
+      <summary>Posso usar esta página como comprovante?</summary>
+      <div><p>Não. Esta é uma republicação independente dos dados públicos, sem caráter oficial. O documento que vale é o recibo e o demonstrativo emitidos pelo próprio Sicar.</p></div>
+    </details>
+  </div>
+</section>
+
+<section id="usar">
+  <h2>Como usar os dados</h2>
+  <div>
+    <p><b>No navegador.</b> Na <a href="index.html">consulta</a>, clique num ponto do mapa, informe o código de um imóvel ou escolha um município. Nada precisa ser instalado.</p>
+    <p><b>Em R ou Python.</b> O pacote <code>carbr</code> faz as mesmas consultas a partir de um programa, e baixa só o trecho necessário dos arquivos.</p>
+<pre><code># R
+pak::pak("castlaboratory/carbr-r")
+library(carbr)
+car_at(lon = -47.9, lat = -15.8)               # imóveis num ponto
+car_properties("PE", municipality = "Petrolina")
+car_summary(c("state", "size_class"))          # totais do país
+car_check(codigos)                             # triagem de uma lista de códigos</code></pre>
+<pre><code># Python
+pip install "carbr[geo]"
+import carbr
+carbr.car_at(lon=-47.9, lat=-15.8)
+carbr.car_properties("PE", municipality="Petrolina")
+carbr.car_summary(["state", "size_class"])
+carbr.car_check(codigos)</code></pre>
+    <p><b>Guias com análises prontas.</b></p>
+    <ul>
+      <li><a href="https://castlaboratory.github.io/carbr-r/articles/carbr.html">Primeiros passos</a> (em <a href="https://castlaboratory.github.io/carbr-py/primeiros-passos/">Python</a>)</li>
+      <li><a href="https://castlaboratory.github.io/carbr-r/articles/analise.html">Onde a análise está parada</a> (em <a href="https://castlaboratory.github.io/carbr-py/fila-da-analise/">Python</a>)</li>
+      <li><a href="https://castlaboratory.github.io/carbr-r/articles/inconsistencias.html">Inconsistências do cadastro</a> (em <a href="https://castlaboratory.github.io/carbr-py/inconsistencias/">Python</a>)</li>
+    </ul>
+    <p><b>Direto nos arquivos.</b> A publicação é um conjunto de arquivos GeoParquet em <code>https://car.castlab.org/current/</code>, descritos em <code>catalog.json</code>. Qualquer ferramenta que leia Parquet pela internet, como o DuckDB, pode consultá-los. O código que gera os arquivos está em <a href="https://github.com/castlaboratory/carbr-etl">carbr-etl</a>.</p>
+  </div>
+</section>
+
+<section id="dicionario">
+  <h2>Dicionário de dados</h2>
+  <div>
+    <p>As colunas dos arquivos, o nome de cada uma no Sicar e o que significam.</p>
+    <div class="table"><table>
+      <thead><tr><th>Coluna</th><th>No Sicar</th><th>O que é</th></tr></thead>
+      <tbody id="dictionary"><tr><td colspan="3">Carregando…</td></tr></tbody>
+    </table></div>
+  </div>
+</section>
+
+<section id="legislacao">
+  <h2>Legislação</h2>
+  <div>
+    <ul class="law">
+      <li><b><a href="https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2012/lei/l12651.htm">Lei nº 12.651, de 2012 (Código Florestal)</a></b>Cria o CAR como registro público eletrônico obrigatório (art. 29) e define a pequena propriedade, a reserva legal e as áreas de preservação permanente.</li>
+      <li><b><a href="https://www.planalto.gov.br/ccivil_03/_ato2011-2014/2012/decreto/d7830.htm">Decreto nº 7.830, de 2012</a></b>Regulamenta o Sicar, o CAR e os Programas de Regularização Ambiental.</li>
+      <li><b><a href="https://www.normasbrasil.com.br/norma/instrucao-normativa-2-2014_488674.html">Instrução Normativa MMA nº 2, de 2014</a></b>Define os procedimentos gerais do CAR e do Sicar, entre eles a inscrição e a análise dos cadastros.</li>
+      <li><b><a href="https://www.normasbrasil.com.br/norma/instrucao-normativa-3-2014_278977.html">Instrução Normativa MMA nº 3, de 2014</a></b>Define o que é sigiloso (os dados que identificam proprietários e possuidores) e garante o livre acesso ao restante. É a base desta republicação.</li>
+      <li><b><a href="https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm">Lei nº 13.709, de 2018 (LGPD)</a></b>Lei Geral de Proteção de Dados Pessoais.</li>
+    </ul>
+    <p>Os serviços oficiais do cadastro ficam em <a href="https://www.car.gov.br/">car.gov.br</a>.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>Fonte dos dados: Sicar, Serviço Florestal Brasileiro. Republicação independente, sem caráter oficial; em caso de divergência, vale o Sicar. Os textos explicativos desta página são nossos e não substituem a orientação do órgão ambiental do seu estado.</p>
+</footer>
+
+<script type="module">
+import { parquetReadObjects, parquetMetadataAsync, compressors } from "./vendor/parquet.js";
+
+const BASE = new URL("current/", location.href).href;
+const int = new Intl.NumberFormat("pt-BR");
+const dec = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+const STAGES = [
+  ["waiting", "#cfd4cf", "Aguardando análise", "O órgão ambiental do estado ainda não analisou o cadastro.", "Aguardando análise"],
+  ["analysing", "#5bb0d6", "Em análise", "O órgão ambiental do estado está analisando o cadastro.", "Em análise"],
+  ["notified", "#f0641e", "Notificado, sem resposta", "A análise encontrou pendências e pediu correções. Falta a resposta de quem declarou o imóvel.", "Analisado, aguardando atendimento a notificação"],
+  ["answered", "#f2c230", "Respondeu, aguarda nova análise", "Quem declarou já respondeu à notificação. O órgão ambiental precisa analisar de novo.", "Aguardando análise, após revisão ou atendimento da notificação"],
+  ["done", "#3fae52", "Analisado", "O órgão ambiental concluiu a análise: o imóvel está em conformidade com a lei ou em regularização ambiental.", "Analisado, em conformidade com a Lei nº 12.651/2012, e outros cinco textos"],
+  ["cancelled", "#7a6c85", "Cancelado", "O cadastro foi cancelado e não vale como registro do imóvel.", "Cancelado por decisão administrativa, e outros quatro textos"],
+];
+function stageOf(condition) {
+  if (condition.startsWith("Cancelado")) return "cancelled";
+  if (condition === "Aguardando análise") return "waiting";
+  if (condition === "Em análise") return "analysing";
+  if (condition.includes("aguardando atendimento a notificação")) return "notified";
+  if (condition.includes("após revisão")) return "answered";
+  return "done";
+}
+
+function stageCards(totals, total) {
+  document.getElementById("stages").replaceChildren(...STAGES.map(([key, color, label, text, sicar]) => {
+    const card = document.createElement("article");
+    card.className = "card";
+    card.style.setProperty("--stage", color);
+    card.innerHTML = `<h3></h3><p></p><p class="sicar"></p><div class="count"></div>`;
+    card.querySelector("h3").textContent = label;
+    card.children[1].textContent = text;
+    card.children[2].textContent = `No Sicar: “${sicar}”.`;
+    if (total) card.querySelector(".count").innerHTML = `<b>${int.format(totals[key] ?? 0)}</b><span>${dec.format((100 * (totals[key] ?? 0)) / total)}% dos imóveis</span>`;
+    return card;
+  }));
+}
+
+async function start() {
+  const catalog = await (await fetch(BASE + "catalog.json", { cache: "no-cache" })).json();
+  const dictionary = await (await fetch(BASE + "dictionary.json")).json();
+  document.getElementById("dictionary").replaceChildren(...dictionary.map((row) => {
+    const tr = document.createElement("tr");
+    for (const value of [row.column, row.sicar_name ?? "calculada", row.description]) {
+      tr.append(Object.assign(document.createElement("td"), { textContent: value }));
+    }
+    return tr;
+  }));
+
+  const totals = {};
+  await Promise.all(Object.keys(catalog.states).map(async (uf) => {
+    const path = `summary/state=${uf}.parquet`;
+    // A assinatura do conteúdo vai no endereço, para o navegador não misturar
+    // trechos guardados de uma versão antiga do arquivo com os da nova.
+    const entry = catalog.files.find((f) => f.path === path);
+    const url = `${BASE}${path}?v=${entry.sha256.slice(0, 16)}`;
+    const byteLength = entry.bytes;
+    const file = { byteLength, slice: async (start, end = byteLength) =>
+      (await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } })).arrayBuffer() };
+    const rows = await parquetReadObjects({ file, metadata: await parquetMetadataAsync(file), compressors, columns: ["condition", "properties"] });
+    rows.forEach((row) => { const s = stageOf(row.condition); totals[s] = (totals[s] ?? 0) + Number(row.properties); });
+  }));
+  stageCards(totals, Object.values(totals).reduce((a, b) => a + b, 0));
+}
+stageCards({}, 0);
+start().catch((error) => console.error(error));
+</script>
+</body>
+</html>

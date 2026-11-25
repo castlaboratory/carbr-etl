@@ -74,6 +74,14 @@ escolher um município mostra o que está declarado, em linguagem simples. Ela l
 Parquet direto do navegador, por requisições parciais, sem servidor de aplicação, e mostra quanto
 cada consulta transferiu. As bibliotecas ficam em `web/vendor/` (ver o README de lá).
 
+`web/ajuda.html` (<https://car.castlab.org/ajuda.html>) é a central de ajuda: o que é o CAR, o que significa
+cada situação e cada etapa da análise, perguntas frequentes, como usar os dados, o dicionário de dados e a
+legislação.
+
+As duas páginas pedem cada arquivo com a assinatura do conteúdo no endereço (`?v=<início do SHA-256>`),
+tirada do catálogo. Sem isso, depois de uma atualização o navegador mistura trechos que guardou do arquivo
+antigo com os do novo e a leitura falha.
+
 ```bash
 uv run etl/car_etl.py web            # envia web/ à raiz do bucket
 ```

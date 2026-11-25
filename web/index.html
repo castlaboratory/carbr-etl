@@ -172,7 +172,7 @@
   <div id="masthead">
     <p class="brand">carbr · Cadastro Ambiental Rural</p>
     <h1>O que está declarado aqui?</h1>
-    <p>Clique num ponto do mapa ou informe o código de um imóvel para ver o que consta no cadastro.</p>
+    <p>Clique num ponto do mapa ou informe o código de um imóvel para ver o que consta no cadastro. <a href="ajuda.html">Entenda os termos</a>.</p>
   </div>
 
   <form id="by-code">
@@ -221,6 +221,7 @@
   <footer>
     <p>Fonte: Sicar, Serviço Florestal Brasileiro; limites municipais do IBGE. Dados de <span id="version">—</span>, atualizados toda semana. O cadastro é autodeclarado: há sobreposições, e constar no CAR não comprova a posse nem a propriedade.</p>
     <p>Republicação independente, sem caráter oficial; em caso de divergência, vale o Sicar. Não há dados pessoais.</p>
+    <p><a href="ajuda.html">Ajuda: o que é o CAR, situações, etapas, perguntas e legislação</a>.</p>
     <p>Para análises: <a href="https://castlaboratory.github.io/carbr-r/">carbr para R</a> e <a href="https://castlaboratory.github.io/carbr-py/">carbr para Python</a>. Código aberto: <a href="https://github.com/castlaboratory/carbr-etl">carbr-etl</a>.</p>
   </footer>
 </main>
@@ -248,8 +249,11 @@ let catalog = null;
 let towns = [];               // resumo de todos os municípios
 
 function remoteFile(path) {
-  const url = BASE + path;
-  const byteLength = catalog.files.find((f) => f.path === path).bytes;
+  // A assinatura do conteúdo vai no endereço: depois de uma atualização, o navegador
+  // não mistura trechos que guardou do arquivo antigo com os do novo.
+  const entry = catalog.files.find((f) => f.path === path);
+  const url = `${BASE}${path}?v=${entry.sha256.slice(0, 16)}`;
+  const byteLength = entry.bytes;
   return {
     byteLength,
     async slice(start, end = byteLength) {
