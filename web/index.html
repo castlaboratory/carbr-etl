@@ -56,8 +56,10 @@
   button:disabled { opacity: .55; cursor: wait; }
   .hint { font-size: .875rem; color: var(--muted); }
 
-  #status { padding-block: .9rem; border-top: 1px solid var(--line); min-height: 3.4rem; }
+  #status { padding-block: .9rem; border-top: 1px solid var(--line); }
   #status[data-kind="error"] { color: var(--alert); font-weight: 600; }
+  #back { padding-bottom: .9rem; }
+  #back[hidden] { display: none; }
 
   #results { display: grid; gap: 1rem; padding-bottom: 1rem; }
   #results:empty { display: none; }
@@ -66,11 +68,11 @@
   /* A ficha: o registro de um imóvel, como numa certidão. */
   .record { border: 1.5px solid var(--ink); background: #fff; }
   .record header { padding: .7rem .9rem .6rem; border-bottom: 1.5px solid var(--ink); cursor: pointer; }
-  .record[aria-current="true"] header { background: var(--parcel); }
+  .record[aria-current="true"] header { background: var(--ink); color: var(--paper); }
   .record h3 { font-size: 1.3rem; font-stretch: 75%; font-weight: 750; line-height: 1.1; }
   .record .code { font-stretch: 62%; font-size: .9rem; word-break: break-all; color: var(--muted); margin-top: .2rem; }
-  .record[aria-current="true"] .code { color: var(--ink); }
-  .record .plain { padding: .7rem .9rem; background: var(--wash); border-bottom: 1px solid var(--line); }
+  .record[aria-current="true"] .code { color: var(--paper); }
+  .record .plain { padding: .7rem .9rem; background: var(--wash); border-bottom: 1px solid var(--line); border-left: .6rem solid var(--stage, var(--line)); }
   .record .plain strong { display: block; }
   .record .plain[data-tone="alert"] strong { color: var(--alert); }
   .record .plain[data-tone="ok"] strong { color: var(--ok); }
@@ -84,7 +86,8 @@
   /* O medidor: quanto esta consulta trouxe, contra o arquivo inteiro. */
   #meter { padding-block: .9rem 1.1rem; border-top: 1px solid var(--line); }
   #meter[hidden] { display: none; }
-  #meter .figure { font-size: 1.9rem; font-stretch: 68%; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  #meter { min-width: 0; overflow: hidden; }
+  #meter .figure { overflow-wrap: anywhere; font-size: 1.6rem; font-stretch: 68%; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
   #meter .scale { position: relative; height: .9rem; margin-block: .55rem .35rem; background: var(--wash); border: 1px solid var(--line); }
   #meter .scale i { position: absolute; inset: 0 auto 0 0; min-width: 3px; background: var(--ink); }
 
@@ -94,10 +97,8 @@
   #numbers ol { list-style: none; padding: 0; margin: 0; display: grid; gap: .45rem; }
   #numbers li { display: grid; grid-template-columns: 1fr auto; column-gap: .75rem; align-items: baseline; }
   #numbers li span:last-of-type { font-variant-numeric: tabular-nums; font-weight: 650; }
-  #numbers li i { grid-column: 1 / -1; height: .5rem; background: var(--ink); min-width: 2px; }
-  #numbers li[data-stage="notified"] i { background: var(--alert); }
-  #numbers li[data-stage="done"] i { background: var(--ok); }
-  #numbers li[data-stage="waiting"] i { background: #8a968d; }
+  #numbers li i { grid-column: 1 / -1; height: .7rem; min-width: 3px; border: 1px solid var(--ink); }
+  #numbers .key { margin-top: .7rem; }
 
   footer { margin-top: auto; padding-block: 1.1rem 1.5rem; border-top: 1px solid var(--line); font-size: .875rem; color: var(--muted); }
   footer p + p { margin-top: .5rem; }
@@ -114,7 +115,8 @@
   @media (max-width: 52rem) {
     body { grid-template-columns: 1fr; grid-template-rows: 52vh auto; height: auto; }
     #map { order: -1; }
-    #sheet { border-right: 0; overflow: visible; }
+    #sheet { border-right: 0; overflow: visible; min-width: 0; }
+    #map { height: 52vh; }
     #sheet > * { padding-inline: 1rem; }
     #masthead h1 { font-size: 1.9rem; }
   }
@@ -150,6 +152,7 @@
   </form>
 
   <p id="status" role="status" aria-live="polite">Carregando o catálogo…</p>
+  <div id="back" hidden><button type="button" id="clear" class="quiet">Limpar a seleção</button></div>
   <section id="results" aria-label="Imóveis encontrados"></section>
 
   <section id="meter" hidden aria-live="polite">
@@ -162,6 +165,7 @@
     <h2 id="numbers-title">Onde a análise está parada</h2>
     <p class="total" id="numbers-total">Somando os estados…</p>
     <ol id="stages"></ol>
+    <p class="hint key">No mapa, cada imóvel aparece na cor da sua etapa.</p>
   </section>
 
   <footer>
@@ -242,6 +246,11 @@ const TYPES = { rural_property: "Imóvel rural", settlement: "Assentamento da re
 const SIZES = { small: "Pequeno (até 4 módulos fiscais)", medium: "Médio (4 a 15 módulos fiscais)", large: "Grande (mais de 15 módulos fiscais)" };
 
 // ---- Mapa ----
+const COLORS = { waiting: "#cfd4cf", analysing: "#5bb0d6", notified: "#f0641e", answered: "#f2c230", done: "#3fae52", cancelled: "#7a6c85" };
+const byStage = ["match", ["get", "stage"], ...Object.entries(COLORS).flat(), "#cfd4cf"];
+const picked = ["boolean", ["feature-state", "picked"], false];
+const current = ["boolean", ["feature-state", "current"], false];
+
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -259,9 +268,9 @@ const map = new maplibregl.Map({
       { id: "satellite", type: "raster", source: "satellite" },
       { id: "streets", type: "raster", source: "streets", layout: { visibility: "none" } },
       { id: "found-fill", type: "fill", source: "found",
-        paint: { "fill-color": "#f2c230", "fill-opacity": ["case", ["boolean", ["feature-state", "current"], false], 0.55, 0.28] } },
+        paint: { "fill-color": byStage, "fill-opacity": ["case", current, 0.8, picked, 0.6, 0.42] } },
       { id: "found-line", type: "line", source: "found",
-        paint: { "line-color": "#f2c230", "line-width": ["case", ["boolean", ["feature-state", "current"], false], 3.5, 1.2] } },
+        paint: { "line-color": ["case", picked, "#ffffff", byStage], "line-width": ["case", current, 4, picked, 2.2, 0.6] } },
     ],
   },
   bounds: [[-74, -34], [-34, 5.5]],
@@ -271,6 +280,7 @@ const map = new maplibregl.Map({
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 map.getCanvas().style.cursor = "crosshair";
 let pin = null;
+const fit = (bounds, padding = 60) => map.fitBounds(bounds, { padding, maxZoom: 15, duration: 500 });
 
 $("basemap").addEventListener("click", () => {
   const satellite = map.getLayoutProperty("satellite", "visibility") !== "none";
@@ -292,34 +302,46 @@ function contains(geometry, x, y) {
   const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
   return polygons.some((rings) => inRing(x, y, rings[0]) && !rings.slice(1).some((hole) => inRing(x, y, hole)));
 }
-function boundsOf(features) {
-  const b = new maplibregl.LngLatBounds();
-  const walk = (c) => (typeof c[0] === "number" ? b.extend(c) : c.forEach(walk));
-  features.forEach((f) => walk(f.geometry.coordinates));
-  return b;
+function boxOf(geometry) {
+  const box = [Infinity, Infinity, -Infinity, -Infinity];
+  const walk = (c) => {
+    if (typeof c[0] !== "number") return c.forEach(walk);
+    if (c[0] < box[0]) box[0] = c[0]; if (c[1] < box[1]) box[1] = c[1];
+    if (c[0] > box[2]) box[2] = c[0]; if (c[1] > box[3]) box[3] = c[1];
+  };
+  walk(geometry.coordinates);
+  return box;
 }
+const boundsOf = (rows) => rows.reduce((b, p) => b.extend([p.box[0], p.box[1]]).extend([p.box[2], p.box[3]]), new maplibregl.LngLatBounds());
+const at = (rows, x, y) => rows.filter((p) => p.box[0] <= x && p.box[2] >= x && p.box[1] <= y && p.box[3] >= y && contains(p.geometry, x, y))
+  .sort((a, b) => a.area_ha - b.area_ha);
 
 // ---- Interface ----
 function say(text, kind = "") { $("status").textContent = text; $("status").dataset.kind = kind; }
 function busy(on) { document.querySelectorAll("form button").forEach((b) => (b.disabled = on)); }
 
+performance.setResourceTimingBufferSize?.(4000);
 function showMeter(seconds, states) {
   const whole = states.reduce((sum, uf) => sum + catalog.files.find((f) => f.path === propertiesPath(uf)).bytes, 0);
-  const mb = traffic.bytes / 1e6;
-  $("meter").hidden = false;
-  $("meter-figure").textContent = `${dec.format(mb)} MB em ${dec.format(seconds)} s`;
-  $("meter-bar").style.width = `${Math.min(100, Math.max(0.4, (100 * traffic.bytes) / whole))}%`;
-  const where = states.length === 1 ? `de ${states[0]}` : `de ${states.join(", ")}`;
+  // O navegador guarda os trechos já lidos: o que veio do cache não passou pela rede.
+  const network = performance.getEntriesByType("resource").filter((e) => e.name.startsWith(BASE))
+    .reduce((sum, e) => sum + (e.transferSize || 0), 0);
+  const cached = traffic.bytes > 0 && network < 0.05 * traffic.bytes;
+  const where = states.length === 1 ? `de ${states[0]}` : `de ${states.join(" e ")}`;
   const times = whole / traffic.bytes;
-  $("meter-note").textContent = traffic.bytes === 0
-    ? "Nada foi transferido: a resposta já estava na memória desta página."
-    : times < 1.5
-      ? `Foi o que esta consulta transferiu: praticamente o arquivo inteiro ${where} (${int.format(whole / 1e6)} MB), porque o pedido cobre quase todo o estado.`
-      : `Foi o que esta consulta transferiu. O arquivo completo ${where} tem ${int.format(whole / 1e6)} MB: ${int.format(times)} vezes mais.`;
+  $("meter").hidden = traffic.bytes === 0;
+  $("meter-figure").textContent = cached ? `${dec.format(traffic.bytes / 1e6)} MB, já guardados` : `${dec.format(traffic.bytes / 1e6)} MB em ${dec.format(seconds)} s`;
+  $("meter-bar").style.width = `${Math.min(100, Math.max(0.4, (100 * traffic.bytes) / whole))}%`;
+  $("meter-note").textContent = (cached
+    ? "Esta consulta não precisou baixar nada de novo: o navegador já tinha esses trechos do arquivo. "
+    : "Foi o que esta consulta transferiu. ")
+    + (times < 1.5
+      ? `É praticamente o arquivo inteiro ${where} (${int.format(whole / 1e6)} MB), porque o pedido cobre quase todo o estado.`
+      : `O arquivo completo ${where} tem ${int.format(whole / 1e6)} MB: ${int.format(times)} vezes mais.`);
 }
 
 function record(p) {
-  const stage = STAGES[stageOf(p.condition)];
+  const stage = STAGES[p.stage];
   const el = document.createElement("article");
   el.className = "record";
   el.dataset.code = p.property_code;
@@ -328,7 +350,7 @@ function record(p) {
     <header tabindex="0" role="button" aria-label="Destacar este imóvel no mapa">
       <h3></h3><p class="code"></p>
     </header>
-    <p class="plain" data-tone="${stage.tone}"><strong></strong><span></span></p>
+    <p class="plain" data-tone="${stage.tone}" style="--stage:${COLORS[p.stage]}"><strong></strong><span></span></p>
     <dl>
       <div><dt>Situação do cadastro</dt><dd>${STATUS[p.status] ?? "Não informada"}</dd></div>
       <div><dt>Área declarada</dt><dd>${ha.format(p.area_ha)} ha</dd></div>
@@ -341,30 +363,43 @@ function record(p) {
   el.querySelector(".code").textContent = p.property_code;
   el.querySelector("strong").textContent = stage.label;
   el.querySelector(".plain span").textContent = `${stage.text} No Sicar: “${p.condition}”.`;
-  const pick = () => highlight(p.property_code, true);
+  const pick = () => { focusOn(p.property_code); fit(boundsOf([p])); };
   el.querySelector("header").addEventListener("click", pick);
   el.querySelector("header").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
   return el;
 }
 
-let current = null;
-let shown = [];
-function highlight(code, zoom = false) {
-  if (current) map.setFeatureState({ source: "found", id: current }, { current: false });
-  current = code;
-  map.setFeatureState({ source: "found", id: code }, { current: true });
-  document.querySelectorAll(".record").forEach((r) => r.setAttribute("aria-current", String(r.dataset.code === code)));
-  if (zoom) map.fitBounds(boundsOf(shown.filter((f) => f.properties.property_code === code)), { padding: 60, maxZoom: 15 });
+// O que está no mapa (drawn), o município carregado (scope) e o que está selecionado (chosen).
+let drawn = [];
+let scope = null;
+let chosen = [];
+let focused = null;
+
+function draw(rows) {
+  drawn = rows.filter((p) => p.geometry).map((p) => ({ ...p, stage: stageOf(p.condition), box: boxOf(p.geometry) }));
+  map.removeFeatureState({ source: "found" });
+  chosen = []; focused = null;
+  map.getSource("found").setData({ type: "FeatureCollection", features: drawn.map(({ geometry, box, created_at, ...properties }) =>
+    ({ type: "Feature", geometry, properties })) });
+  $("results").replaceChildren();
+  $("back").hidden = true;
+  return drawn;
 }
 
-function show(rows, { cards = true } = {}) {
-  shown = rows.map(({ geometry, ...properties }) => ({ type: "Feature", geometry,
-    properties: { ...properties, created_at: String(properties.created_at) } }));
-  current = null;
-  map.getSource("found").setData({ type: "FeatureCollection", features: shown });
+function focusOn(code) {
+  if (focused) map.setFeatureState({ source: "found", id: focused }, { current: false });
+  focused = code;
+  map.setFeatureState({ source: "found", id: code }, { current: true });
+  document.querySelectorAll(".record").forEach((r) => r.setAttribute("aria-current", String(r.dataset.code === code)));
+}
+
+function choose(rows) {
+  chosen.forEach((code) => map.setFeatureState({ source: "found", id: code }, { picked: false, current: false }));
+  chosen = rows.map((p) => p.property_code);
+  focused = null;
+  chosen.forEach((code) => map.setFeatureState({ source: "found", id: code }, { picked: true }));
   const list = $("results");
   list.replaceChildren();
-  if (!cards || rows.length === 0) return;
   if (rows.length > 1) {
     const note = document.createElement("p");
     note.className = "overlap";
@@ -372,8 +407,23 @@ function show(rows, { cards = true } = {}) {
     list.append(note);
   }
   rows.forEach((p) => list.append(record(p)));
-  map.once("idle", () => highlight(rows[0].property_code));
+  $("back").hidden = rows.length === 0;
+  $("clear").textContent = scope ? `Voltar para ${scope.town.municipality}` : "Limpar a seleção";
+  if (rows.length) { focusOn(rows[0].property_code); fit(boundsOf(rows)); }
 }
+
+$("clear").addEventListener("click", () => {
+  pin?.remove();
+  if (scope) {
+    choose([]);
+    fit([[scope.town.xmin, scope.town.ymin], [scope.town.xmax, scope.town.ymax]], 30);
+    say(scope.text);
+  } else {
+    draw([]);
+    $("meter").hidden = true;
+    say("Clique num ponto do mapa ou informe o código de um imóvel.");
+  }
+});
 
 let running = false;
 async function consult(states, run) {
@@ -381,6 +431,7 @@ async function consult(states, run) {
   busy(true);
   $("crosshair-tip").hidden = true;
   traffic.bytes = 0; traffic.requests = 0;
+  performance.clearResourceTimings();
   const started = performance.now();
   try {
     await run();
@@ -393,16 +444,31 @@ async function consult(states, run) {
     busy(false);
   }
 }
+const found = (n) => (n === 1 ? "1 imóvel declarado neste ponto." : `${n} imóveis declarados neste ponto.`);
 
 // ---- Consulta por ponto ----
 map.on("click", (event) => {
   if (running) return;                // uma consulta por vez
   const { lng: x, lat: y } = event.lngLat;
-  const states = [...new Set(towns.filter((t) => t.xmin <= x && t.xmax >= x && t.ymin <= y && t.ymax >= y).map((t) => t.state))];
   pin?.remove();
   pin = new maplibregl.Marker({ color: "#14301f" }).setLngLat([x, y]).addTo(map);
+  $("crosshair-tip").hidden = true;
+
+  // Com um município carregado, a resposta já está na página: não precisa de rede.
+  if (scope) {
+    const hits = at(drawn, x, y);
+    if (hits.length) {
+      choose(hits);
+      $("meter").hidden = true;
+      say(`${found(hits.length)} A resposta veio do que já estava carregado, sem nova consulta.`);
+      return;
+    }
+  }
+
+  const states = [...new Set(towns.filter((t) => t.xmin <= x && t.xmax >= x && t.ymin <= y && t.ymax >= y).map((t) => t.state))];
   if (states.length === 0) {
-    show([]); $("meter").hidden = true;
+    if (!scope) draw([]);
+    $("meter").hidden = true;
     say(towns.length ? "Nenhum imóvel declarado neste ponto." : "O catálogo ainda está carregando; tente em alguns segundos.");
     return;
   }
@@ -410,21 +476,12 @@ map.on("click", (event) => {
   consult(states, async () => {
     const filter = { xmin: { $lte: x }, xmax: { $gte: x }, ymin: { $lte: y }, ymax: { $gte: y } };
     const parts = await Promise.all(states.map((uf) => read(propertiesPath(uf), { columns: [...FIELDS, "geometry"], filter })));
-    const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y)).sort((a, b) => a.area_ha - b.area_ha);
-    show(rows);
-    if (rows.length) {
-      map.fitBounds(boundsOf(shown), { padding: 60, maxZoom: 15 });
-      say(rows.length === 1 ? "1 imóvel declarado neste ponto." : `${rows.length} imóveis declarados neste ponto.`);
-    } else {
-      say("Nenhum imóvel declarado neste ponto.");
-    }
+    const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y));
+    if (rows.length === 0 && scope) { say("Nenhum imóvel declarado neste ponto."); return; }
+    scope = null;
+    choose(at(draw(rows), x, y));
+    say(rows.length ? found(rows.length) : "Nenhum imóvel declarado neste ponto.");
   });
-});
-map.on("click", "found-fill", (event) => {
-  if (shown.length > 50) return;      // na visão do município, o clique consulta o ponto
-  const code = event.features[0].properties.property_code;
-  highlight(code);
-  document.querySelector(`.record[data-code="${code}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
 });
 
 // ---- Consulta por código ----
@@ -447,13 +504,9 @@ $("by-code").addEventListener("submit", (event) => {
     // Alguns imóveis estão registrados em município diferente do que o código indica.
     if (rows.length === 0) rows = await read(propertiesPath(uf), { columns, filter: { property_code: { $eq: code } } });
     pin?.remove();
-    show(rows);
-    if (rows.length) {
-      map.fitBounds(boundsOf(shown), { padding: 60, maxZoom: 15 });
-      say("Imóvel encontrado.");
-    } else {
-      say("Não há imóvel com esse código nesta publicação. Ele pode ter sido cadastrado depois da última atualização.");
-    }
+    scope = null;
+    choose(draw(rows));
+    say(rows.length ? "Imóvel encontrado." : "Não há imóvel com esse código nesta publicação. Ele pode ter sido cadastrado depois da última atualização.");
   });
 });
 
@@ -476,10 +529,12 @@ $("by-place").addEventListener("submit", (event) => {
   consult([uf], async () => {
     const rows = await read(propertiesPath(uf), { columns: [...FIELDS, "geometry"],
       filter: { municipality_code: { $eq: town.municipality_code } } });
-    show(rows.filter((p) => p.geometry), { cards: false });
-    map.fitBounds([[town.xmin, town.ymin], [town.xmax, town.ymax]], { padding: 30 });
+    draw(rows);
     const small = Math.round((100 * town.small_properties) / town.properties);
-    say(`${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. Clique num ponto para ver o que está declarado ali.`);
+    const text = `${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. Clique num imóvel para ver a ficha.`;
+    scope = { town, uf, text };
+    fit([[town.xmin, town.ymin], [town.xmax, town.ymax]], 30);
+    say(text);
   });
 });
 
@@ -498,14 +553,14 @@ async function start() {
   });
 
   const summary = (await Promise.all(states.map((uf) => read(`summary/state=${uf}.parquet`, { columns: ["condition", "properties"] })))).flat();
-  const byStage = {};
-  summary.forEach((row) => { const s = stageOf(row.condition); byStage[s] = (byStage[s] ?? 0) + Number(row.properties); });
-  const largest = Math.max(...Object.values(byStage));
-  $("numbers-total").textContent = `De cada 100 imóveis no CAR, ${Math.round((100 * byStage.waiting) / total)} ainda esperam a análise e ${Math.round((100 * byStage.notified) / total)} foram notificados e não responderam.`;
+  const totals = {};
+  summary.forEach((row) => { const s = stageOf(row.condition); totals[s] = (totals[s] ?? 0) + Number(row.properties); });
+  const largest = Math.max(...Object.values(totals));
+  $("numbers-total").textContent = `De cada 100 imóveis no CAR, ${Math.round((100 * totals.waiting) / total)} ainda esperam a análise e ${Math.round((100 * totals.notified) / total)} foram notificados e não responderam.`;
   $("stages").replaceChildren(...Object.keys(STAGES).map((key) => {
     const li = document.createElement("li");
     li.dataset.stage = key;
-    li.innerHTML = `<span></span><span>${int.format(byStage[key] ?? 0)}</span><i style="width:${(100 * (byStage[key] ?? 0)) / largest}%"></i>`;
+    li.innerHTML = `<span></span><span>${int.format(totals[key] ?? 0)}</span><i style="width:${(100 * (totals[key] ?? 0)) / largest}%;background:${COLORS[key]}"></i>`;
     li.firstChild.textContent = STAGES[key].label;
     return li;
   }));
