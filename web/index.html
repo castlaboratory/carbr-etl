@@ -124,6 +124,28 @@
   #map { position: relative; min-height: 0; }
   #map .maplibregl-canvas:focus-visible { outline: 3px solid var(--parcel); outline-offset: -3px; }
   #basemap { position: absolute; z-index: 2; top: .75rem; left: .75rem; background: var(--paper); color: var(--ink); }
+  /* Dica que acompanha o cursor sobre um imóvel, e dica das etapas na legenda. */
+  #tip, #stages li[data-tip]:is(:hover, :focus-visible)::after {
+    background: #fff; color: var(--ink); border: 1.5px solid var(--ink); border-radius: 2px;
+    box-shadow: 4px 4px 0 rgb(20 48 31 / .35); font-size: .9rem; line-height: 1.35;
+  }
+  #tip { position: absolute; z-index: 3; top: 0; left: 0; width: max-content; max-width: 17rem; pointer-events: none; }
+  #tip[hidden] { display: none; }
+  #tip strong { display: block; padding: .4rem .65rem; border-bottom: 1.5px solid var(--ink); border-left: .6rem solid var(--stage, var(--line)); }
+  #tip p { padding: .1rem .65rem; }
+  #tip p:first-of-type { padding-top: .4rem; }
+  #tip p:last-child { padding-bottom: .45rem; color: var(--muted); }
+  #stages li { position: relative; padding: .2rem .35rem; margin-inline: -.35rem; cursor: default; }
+  #stages li:is(:hover, :focus-visible) { background: var(--wash); }
+  #stages li[data-tip]:is(:hover, :focus-visible)::after {
+    content: attr(data-tip); position: absolute; z-index: 4; left: .35rem; right: .35rem; top: calc(100% + .2rem);
+    padding: .45rem .65rem;
+  }
+  #stages li:nth-last-child(-n+2)[data-tip]:is(:hover, :focus-visible)::after { top: auto; bottom: calc(100% + .2rem); }
+  .record header:hover { background: var(--wash); }
+  .record[aria-current="true"] header:hover { background: var(--ink); }
+  button:not(:disabled):hover { background: #24523a; }
+  button.quiet:not(:disabled):hover { background: var(--wash); }
   #crosshair-tip {
     position: absolute; z-index: 2; bottom: 2rem; left: 50%; translate: -50% 0; max-width: calc(100% - 2rem);
     background: var(--ink); color: var(--paper); padding: .5rem .85rem; font-weight: 600; pointer-events: none;
@@ -193,7 +215,7 @@
     <h2 id="numbers-title">Onde a análise está parada</h2>
     <p class="total" id="numbers-total">Somando os estados…</p>
     <ol id="stages"></ol>
-    <p class="hint key">No mapa, cada imóvel aparece na cor da sua etapa.</p>
+    <p class="hint key">No mapa, cada imóvel aparece na cor da sua etapa. Passe o cursor sobre uma etapa para destacar os imóveis dela.</p>
   </section>
 
   <footer>
@@ -206,6 +228,7 @@
 <div id="map" role="application" aria-label="Mapa. Clique num ponto para consultar os imóveis declarados ali.">
   <button id="basemap" type="button" class="quiet" aria-pressed="true">Ver mapa de ruas</button>
   <p id="crosshair-tip">Clique num ponto para consultar</p>
+  <div id="tip" role="tooltip" hidden></div>
 </div>
 
 <script src="vendor/maplibre-gl.js"></script>
@@ -278,6 +301,9 @@ const COLORS = { waiting: "#cfd4cf", analysing: "#5bb0d6", notified: "#f0641e", 
 const byStage = ["match", ["get", "stage"], ...Object.entries(COLORS).flat(), "#cfd4cf"];
 const picked = ["boolean", ["feature-state", "picked"], false];
 const current = ["boolean", ["feature-state", "current"], false];
+const hovered = ["boolean", ["feature-state", "hover"], false];
+const FILL = ["case", current, 0.8, hovered, 0.72, picked, 0.6, 0.42];
+const LINE = ["case", current, 4, hovered, 2.6, picked, 2.2, 0.6];
 
 const map = new maplibregl.Map({
   container: "map",
@@ -297,9 +323,9 @@ const map = new maplibregl.Map({
       { id: "satellite", type: "raster", source: "satellite" },
       { id: "streets", type: "raster", source: "streets", layout: { visibility: "none" } },
       { id: "found-fill", type: "fill", source: "found",
-        paint: { "fill-color": byStage, "fill-opacity": ["case", current, 0.8, picked, 0.6, 0.42] } },
+        paint: { "fill-color": byStage, "fill-opacity": FILL } },
       { id: "found-line", type: "line", source: "found",
-        paint: { "line-color": ["case", picked, "#ffffff", byStage], "line-width": ["case", current, 4, picked, 2.2, 0.6] } },
+        paint: { "line-color": ["case", ["any", picked, hovered], "#ffffff", byStage], "line-width": LINE } },
       { id: "boundary-casing", type: "line", source: "boundary", paint: { "line-color": "#14301f", "line-width": 5, "line-opacity": 0.55 } },
       { id: "boundary-line", type: "line", source: "boundary", paint: { "line-color": "#ffffff", "line-width": 2.2 } },
     ],
@@ -411,6 +437,7 @@ function record(p) {
   el.querySelector("strong").textContent = stage.label;
   el.querySelector(".plain span").textContent = `${stage.text} No Sicar: “${p.condition}”.`;
   const pick = () => { focusOn(p.property_code); fit(boundsOf([p])); };
+  el.querySelector("header").addEventListener("mouseenter", () => focusOn(p.property_code));
   el.querySelector("header").addEventListener("click", pick);
   el.querySelector("header").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
   return el;
@@ -492,6 +519,53 @@ async function consult(states, run) {
   }
 }
 const found = (n) => (n === 1 ? "1 imóvel declarado neste ponto." : `${n} imóveis declarados neste ponto.`);
+
+// ---- Passar o cursor: dica do imóvel e destaque no mapa ----
+let over = null;
+function leave() {
+  if (over) map.setFeatureState({ source: "found", id: over }, { hover: false });
+  over = null;
+  $("tip").hidden = true;
+  map.getCanvas().style.cursor = "crosshair";
+}
+map.on("mousemove", "found-fill", (event) => {
+  const codes = [...new Set(event.features.map((f) => f.properties.property_code))];
+  const here = drawn.filter((p) => codes.includes(p.property_code)).sort((a, b) => a.area_ha - b.area_ha);
+  if (here.length === 0) return leave();
+  const p = here[0];
+  if (over !== p.property_code) {
+    if (over) map.setFeatureState({ source: "found", id: over }, { hover: false });
+    over = p.property_code;
+    map.setFeatureState({ source: "found", id: over }, { hover: true });
+    const tip = $("tip");
+    tip.style.setProperty("--stage", COLORS[p.stage]);
+    tip.replaceChildren(
+      Object.assign(document.createElement("strong"), { textContent: STAGES[p.stage].label }),
+      Object.assign(document.createElement("p"), { textContent: `${ha.format(p.area_ha)} ha, ${(SIZES[p.size_class] ?? "").split(" (")[0].toLowerCase()}` }),
+      Object.assign(document.createElement("p"), { textContent: `${TYPES[p.property_type] ?? "Imóvel"} em ${p.municipality}, ${p.state}` }),
+      Object.assign(document.createElement("p"), { textContent: here.length > 1
+        ? `Mais ${here.length - 1} ${here.length === 2 ? "cadastro cobre" : "cadastros cobrem"} este ponto. Clique para ver as fichas.`
+        : "Clique para ver a ficha." }),
+    );
+    tip.hidden = false;
+  }
+  // A dica fica ao lado do cursor e vira para dentro perto das bordas do mapa.
+  const tip = $("tip"), box = $("map").getBoundingClientRect();
+  const x = event.point.x + 16 + tip.offsetWidth > box.width ? event.point.x - 16 - tip.offsetWidth : event.point.x + 16;
+  const y = event.point.y + 16 + tip.offsetHeight > box.height ? event.point.y - 16 - tip.offsetHeight : event.point.y + 16;
+  tip.style.translate = `${Math.max(4, x)}px ${Math.max(4, y)}px`;
+  map.getCanvas().style.cursor = "pointer";
+});
+map.on("mouseleave", "found-fill", leave);
+map.on("movestart", leave);
+
+// Destaca no mapa os imóveis de uma etapa (ao passar o cursor na legenda).
+function spotlight(stage) {
+  if (!map.getLayer("found-fill")) return;
+  const is = ["==", ["get", "stage"], stage ?? ""];
+  map.setPaintProperty("found-fill", "fill-opacity", stage ? ["case", is, 0.88, 0.06] : FILL);
+  map.setPaintProperty("found-line", "line-opacity", stage ? ["case", is, 1, 0.12] : 1);
+}
 
 // ---- Consulta por ponto ----
 map.on("click", (event) => {
@@ -664,6 +738,10 @@ async function start() {
     li.dataset.stage = key;
     li.innerHTML = `<span></span><span>${int.format(totals[key] ?? 0)}</span><i style="width:${(100 * (totals[key] ?? 0)) / largest}%;background:${COLORS[key]}"></i>`;
     li.firstChild.textContent = STAGES[key].label;
+    li.tabIndex = 0;
+    li.dataset.tip = `${dec.format((100 * (totals[key] ?? 0)) / total)}% dos imóveis do país. ${STAGES[key].text.replace("este cadastro", "o cadastro").replace("Este cadastro", "O cadastro").replace("deste cadastro", "do cadastro")}`;
+    for (const on of ["mouseenter", "focus"]) li.addEventListener(on, () => spotlight(key));
+    for (const off of ["mouseleave", "blur"]) li.addEventListener(off, () => spotlight(null));
     return li;
   }));
 }
