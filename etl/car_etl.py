@@ -32,6 +32,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -586,6 +587,12 @@ def mesh(uf: str) -> Path | None:
 
 FUNAI_WFS = ("https://geoserver.funai.gov.br/geoserver/Funai/ows?service=WFS&version=2.0.0&request=GetFeature"
              "&typeName=Funai:tis_poligonais&count=10000&sortBy=gid&outputFormat=application/json")
+# O CNUC corrente sai do mesmo pedido que o botão de download do mapa (https://cnuc.mma.gov.br/map)
+# faz ao escolher "Shapefile" sem selecionar unidades. Os campos são fixos: são os que a página envia.
+CNUC_LIVE = "https://cnuc-backend.mma.gov.br/api/v1/downloadGeo"
+CNUC_LIVE_BODY = {"format": "shp", "map": "/var/www/storage/app/mapfiles/ucs.map", "name": "ucs",
+                  "typename": "ucs_selected", "ucIds": "null"}
+# Reserva: o último shapefile semestral hospedado no portal de dados do MMA.
 CNUC_DATASET = "https://dados.mma.gov.br/api/3/action/package_show?id=unidadesdeconservacao"
 BROWSER_AGENT = "Mozilla/5.0 (compatible; carbr-etl; +https://github.com/castlaboratory/carbr-etl)"
 
@@ -602,16 +609,48 @@ def get(url: str, dest: Path, timeout: int = 900) -> bool:
     return True
 
 
+def unpack_shapefile(archive: Path, folder: Path) -> bool:
+    """Extrai um zip com shapefile para `folder`, trocando o que havia lá. `False` se não servir."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(archive) as z:
+            members = [m for m in z.infolist() if not m.is_dir()]
+            if not any(m.filename.lower().endswith(".shp") for m in members):
+                return False
+            folder.mkdir(parents=True, exist_ok=True)
+            for old in folder.iterdir():
+                old.unlink()
+            for member in members:                      # só o nome do arquivo, nunca o caminho do zip
+                (folder / Path(member.filename).name).write_bytes(z.read(member))
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return True
+
+
+def cnuc_live(folder: Path) -> bool:
+    """Baixa o CNUC corrente pelo download do mapa. `False` se o servidor não entregar um shapefile."""
+    archive = folder / "cnuc-live.zip"
+    tmp = archive.with_name(archive.name + ".part")
+    rc = subprocess.run([
+        "curl", "-sS", "--fail", "-m", "1200", "-A", BROWSER_AGENT, "-X", "POST", CNUC_LIVE,
+        "-H", "Content-Type: application/json", "-H", "Origin: https://cnuc.mma.gov.br",
+        "-H", "Referer: https://cnuc.mma.gov.br/map", "-d", json.dumps(CNUC_LIVE_BODY), "-o", str(tmp),
+    ]).returncode
+    ok = rc == 0 and tmp.exists() and tmp.stat().st_size > 1_000_000 and unpack_shapefile(tmp, folder / "cnuc")
+    tmp.unlink(missing_ok=True)
+    return ok
+
+
 def protected() -> Path | None:
     """Terras indígenas (Funai) e unidades de conservação (CNUC/MMA) num Parquet local, por 30 dias.
 
     Uma linha por área: `kind` (indigenous, strict = proteção integral, sustainable = uso
-    sustentável), `name`, `category` e a geometria em SIRGAS 2000. O CNUC sai do último shapefile
-    hospedado no portal de dados do MMA. Se uma fonte falhar, vale a cópia anterior; `None` se
-    não houver nenhuma.
+    sustentável), `name`, `category` e a geometria em SIRGAS 2000. O CNUC vem do download do mapa
+    (dados correntes) ou, se ele falhar, do último shapefile do portal de dados do MMA. Se uma
+    fonte falhar, vale a cópia anterior; `None` se não houver nenhuma. Com `CAR_PROTECTED_OFFLINE=1`
+    nada é baixado: o Parquet é refeito com os arquivos que já estão em `data/protected/`.
     """
-    import zipfile
-
     import duckdb
 
     folder = ROOT / "protected"
@@ -622,29 +661,37 @@ def protected() -> Path | None:
     funai, listing, archive = folder / "tis.geojson", folder / "cnuc.json", folder / "cnuc.zip"
     info = json.loads(meta.read_text()) if meta.exists() else {}
     today = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
+    offline = os.environ.get("CAR_PROTECTED_OFFLINE") == "1"
+    cnuc = "MMA, Cadastro Nacional de Unidades de Conservação (CNUC)"
     try:
-        if not get(FUNAI_WFS, funai) or not json.loads(funai.read_text())["features"]:
-            raise ValueError("resposta vazia")
-        info["indigenous"] = {"source": "Funai, Terras Indígenas (tis_poligonais)", "downloaded": today}
+        if not offline:
+            if not get(FUNAI_WFS, funai) or not json.loads(funai.read_text())["features"]:
+                raise ValueError("resposta vazia")
+            info["indigenous"] = {"source": "Funai, Terras Indígenas (tis_poligonais)", "downloaded": today}
     except Exception as err:
         log(f"áreas protegidas: Funai indisponível ({err})")
     try:
-        if not get(CNUC_DATASET, listing, 120):
-            raise ValueError("portal de dados do MMA indisponível")
-        shapes = [r for r in json.loads(listing.read_text())["result"]["resources"]
-                  if "shp" in (r.get("format") or "").lower() and "dados.mma.gov.br" in r["url"]]
-        latest = max(shapes, key=lambda r: r.get("last_modified") or "")
-        if info.get("conservation", {}).get("url") != latest["url"] or not list(folder.glob("cnuc/*.shp")):
-            if not get(latest["url"], archive):
-                raise ValueError("download do shapefile falhou")
-            (folder / "cnuc").mkdir(exist_ok=True)
-            with zipfile.ZipFile(archive) as z:        # só o nome do arquivo, nunca o caminho do zip
-                for member in z.infolist():
-                    if not member.is_dir():
-                        (folder / "cnuc" / Path(member.filename).name).write_bytes(z.read(member))
-            archive.unlink()
-        info["conservation"] = {"source": "MMA, Cadastro Nacional de Unidades de Conservação (CNUC)",
-                                "edition": latest["name"], "url": latest["url"], "downloaded": today}
+        if offline:
+            pass
+        elif cnuc_live(folder):
+            info["conservation"] = {"source": cnuc, "edition": f"download do mapa em {today}",
+                                    "url": "https://cnuc.mma.gov.br/map", "downloaded": today}
+        else:
+            log("áreas protegidas: download do mapa do CNUC falhou; usando o portal de dados")
+            if not get(CNUC_DATASET, listing, 120):
+                raise ValueError("portal de dados do MMA indisponível")
+            shapes = [r for r in json.loads(listing.read_text())["result"]["resources"]
+                      if "shp" in (r.get("format") or "").lower() and "dados.mma.gov.br" in r["url"]]
+            latest = max(shapes, key=lambda r: r.get("last_modified") or "")
+            # Uma cópia do mapa mais nova que a edição semestral não é trocada por ela.
+            have = info.get("conservation", {})
+            newer = have.get("url") == "https://cnuc.mma.gov.br/map" and list(folder.glob("cnuc/*.shp"))
+            if not newer and (have.get("url") != latest["url"] or not list(folder.glob("cnuc/*.shp"))):
+                if not get(latest["url"], archive) or not unpack_shapefile(archive, folder / "cnuc"):
+                    raise ValueError("download do shapefile falhou")
+                archive.unlink(missing_ok=True)
+                info["conservation"] = {"source": cnuc, "edition": latest["name"], "url": latest["url"],
+                                        "downloaded": today}
     except Exception as err:
         log(f"áreas protegidas: CNUC indisponível ({err})")
     parts = []
