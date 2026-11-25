@@ -584,8 +584,96 @@ def mesh(uf: str) -> Path | None:
     return path if path.exists() else None
 
 
+FUNAI_WFS = ("https://geoserver.funai.gov.br/geoserver/Funai/ows?service=WFS&version=2.0.0&request=GetFeature"
+             "&typeName=Funai:tis_poligonais&count=10000&sortBy=gid&outputFormat=application/json")
+CNUC_DATASET = "https://dados.mma.gov.br/api/3/action/package_show?id=unidadesdeconservacao"
+BROWSER_AGENT = "Mozilla/5.0 (compatible; carbr-etl; +https://github.com/castlaboratory/carbr-etl)"
+
+
+def get(url: str, dest: Path, timeout: int = 900) -> bool:
+    """Baixa `url` para `dest` (por um arquivo temporário). Devolve se deu certo."""
+    tmp = dest.with_name(dest.name + ".part")
+    rc = subprocess.run(["curl", "-sS", "--fail", "--compressed", "-L", "-m", str(timeout), "-A", BROWSER_AGENT,
+                         "-o", str(tmp), url]).returncode
+    if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.rename(dest)
+    return True
+
+
+def protected() -> Path | None:
+    """Terras indígenas (Funai) e unidades de conservação (CNUC/MMA) num Parquet local, por 30 dias.
+
+    Uma linha por área: `kind` (indigenous, strict = proteção integral, sustainable = uso
+    sustentável), `name`, `category` e a geometria em SIRGAS 2000. O CNUC sai do último shapefile
+    hospedado no portal de dados do MMA. Se uma fonte falhar, vale a cópia anterior; `None` se
+    não houver nenhuma.
+    """
+    import zipfile
+
+    import duckdb
+
+    folder = ROOT / "protected"
+    out, meta = folder / "areas.parquet", folder / "areas.json"
+    if out.exists() and time.time() - out.stat().st_mtime < 30 * 86400:
+        return out
+    folder.mkdir(parents=True, exist_ok=True)
+    funai, listing, archive = folder / "tis.geojson", folder / "cnuc.json", folder / "cnuc.zip"
+    info = json.loads(meta.read_text()) if meta.exists() else {}
+    today = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
+    try:
+        if not get(FUNAI_WFS, funai) or not json.loads(funai.read_text())["features"]:
+            raise ValueError("resposta vazia")
+        info["indigenous"] = {"source": "Funai, Terras Indígenas (tis_poligonais)", "downloaded": today}
+    except Exception as err:
+        log(f"áreas protegidas: Funai indisponível ({err})")
+    try:
+        if not get(CNUC_DATASET, listing, 120):
+            raise ValueError("portal de dados do MMA indisponível")
+        shapes = [r for r in json.loads(listing.read_text())["result"]["resources"]
+                  if "shp" in (r.get("format") or "").lower() and "dados.mma.gov.br" in r["url"]]
+        latest = max(shapes, key=lambda r: r.get("last_modified") or "")
+        if info.get("conservation", {}).get("url") != latest["url"] or not list(folder.glob("cnuc/*.shp")):
+            if not get(latest["url"], archive):
+                raise ValueError("download do shapefile falhou")
+            (folder / "cnuc").mkdir(exist_ok=True)
+            with zipfile.ZipFile(archive) as z:        # só o nome do arquivo, nunca o caminho do zip
+                for member in z.infolist():
+                    if not member.is_dir():
+                        (folder / "cnuc" / Path(member.filename).name).write_bytes(z.read(member))
+            archive.unlink()
+        info["conservation"] = {"source": "MMA, Cadastro Nacional de Unidades de Conservação (CNUC)",
+                                "edition": latest["name"], "url": latest["url"], "downloaded": today}
+    except Exception as err:
+        log(f"áreas protegidas: CNUC indisponível ({err})")
+    parts = []
+    if funai.exists():
+        parts.append(f"""SELECT 'indigenous' AS kind, terrai_nome AS name, fase_ti AS category, geom
+                         FROM ST_Read('{funai}')""")
+    shapes = sorted(p for p in folder.glob("cnuc/*.shp") if "pontos" not in p.name)
+    if shapes:
+        parts.append(f"""SELECT CASE WHEN grupo ILIKE '%integral%' THEN 'strict' ELSE 'sustainable' END AS kind,
+                                nome_uc AS name, categoria AS category, geom
+                         FROM ST_Read('{shapes[-1]}') WHERE coalesce(situacao, 'Ativo') = 'Ativo'""")
+    if not parts:
+        return out if out.exists() else None
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+    con.execute(f"""
+        COPY (SELECT row_number() OVER () AS aid, kind, name, category, ST_MakeValid(geom)::GEOMETRY AS g
+              FROM ({' UNION ALL '.join(parts)}) WHERE geom IS NOT NULL)
+        TO '{out}' (FORMAT parquet, COMPRESSION zstd)
+    """)
+    meta.write_text(json.dumps(info, indent=2, ensure_ascii=False))
+    counts = dict(con.execute(f"SELECT kind, count(*) FROM '{out}' GROUP BY 1").fetchall())
+    log(f"áreas protegidas: {counts}")
+    return out
+
+
 def quality(uf: str) -> None:
-    """Indicadores de qualidade por imóvel: sobreposição com vizinhos e área fora do município.
+    """Indicadores de qualidade por imóvel: sobreposição com vizinhos, área fora do município e
+    sobreposição com terras indígenas e unidades de conservação.
 
     Lê os imóveis do que foi gerado localmente ou, se não houver, do bucket. Publica
     `quality/state=<UF>.parquet` (uma linha por imóvel não cancelado) e
@@ -638,14 +726,47 @@ def quality(uf: str) -> None:
         join = "LEFT JOIN m USING (municipality_code)"
     else:
         outside, join = "NULL::DOUBLE", ""
+    # Terras indígenas e unidades de conservação: a parcela do imóvel dentro de cada tipo (a união
+    # das interseções, porque as áreas de um mesmo tipo se sobrepõem) e a área que mais pesa.
+    areas = protected()
+    if areas:
+        # As duas tabelas sem o sistema de referência no tipo (um vem como CRS84, o outro como
+        # EPSG:4674; as coordenadas são as mesmas), senão a junção espacial recusa o par.
+        con.execute(f"CREATE TABLE a AS SELECT aid, kind, name, category, g::GEOMETRY AS ag FROM '{areas}'")
+        con.execute("CREATE TABLE pu AS SELECT rid, g::GEOMETRY AS g FROM p")
+        con.execute("CREATE TABLE hit AS SELECT pu.rid, a.aid FROM pu JOIN a ON ST_Intersects(pu.g, a.ag)")
+        con.execute("""
+            CREATE TABLE cut AS
+            SELECT h.rid, a.kind, a.name, a.category, ST_Intersection(pu.g, a.ag) AS ig, ST_Area(pu.g) AS area
+            FROM hit h JOIN pu ON pu.rid = h.rid JOIN a ON a.aid = h.aid
+        """)
+        con.execute("""
+            CREATE TABLE shares AS
+            SELECT rid, kind, least(1.0, ST_Area(ST_Union_Agg(ig)) / nullif(any_value(area), 0)) AS share,
+                   arg_max(name, ST_Area(ig)) AS name, arg_max(category, ST_Area(ig)) AS category
+            FROM cut WHERE ST_Area(ig) > 0 GROUP BY rid, kind
+        """)
+    else:
+        con.execute("""CREATE TABLE shares (rid BIGINT, kind VARCHAR, share DOUBLE, name VARCHAR, category VARCHAR)""")
+    # Sem as camadas, as parcelas ficam nulas (não calculadas), não zero.
+    share = (lambda k: f"round(coalesce({k}.share, 0), 4)") if areas else (lambda k: "NULL::DOUBLE")
     quality_file = out / "quality.parquet"
     con.execute(f"""
         COPY (
             SELECT p.property_code, p.municipality_code,
                    coalesce(o.overlap_count, 0)::INTEGER AS overlap_count,
                    round(least(1.0, coalesce(o.inter, 0) / nullif(ST_Area(p.g), 0)), 4) AS overlap_share,
-                   round({outside}, 4) AS outside_share
+                   round({outside}, 4) AS outside_share,
+                   {share('ti')} AS indigenous_share,
+                   {share('pi')} AS strict_protection_share,
+                   {share('us')} AS sustainable_use_share,
+                   ti.name AS indigenous_land,
+                   coalesce(pi.name, us.name) AS conservation_unit,
+                   coalesce(pi.category, us.category) AS conservation_category
             FROM p LEFT JOIN overlap o USING (rid) {join}
+                 LEFT JOIN shares ti ON ti.rid = p.rid AND ti.kind = 'indigenous'
+                 LEFT JOIN shares pi ON pi.rid = p.rid AND pi.kind = 'strict'
+                 LEFT JOIN shares us ON us.rid = p.rid AND us.kind = 'sustainable'
             ORDER BY p.municipality_code, p.property_code
         ) TO '{quality_file}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 8192)
     """)
@@ -657,14 +778,22 @@ def quality(uf: str) -> None:
                    count(*) FILTER (q.overlap_share > 0.5) AS overlapping_half,
                    round(sum(p.area_ha * q.overlap_share), 2) AS overlap_ha,
                    count(*) FILTER (q.outside_share > 0.5) AS outside_half,
-                   round(sum(p.area_ha * q.outside_share), 2) AS outside_ha
+                   round(sum(p.area_ha * q.outside_share), 2) AS outside_ha,
+                   count(*) FILTER (q.indigenous_share > 0.01) AS indigenous,
+                   round(sum(p.area_ha * q.indigenous_share), 2) AS indigenous_ha,
+                   count(*) FILTER (q.strict_protection_share > 0.01) AS strict_protection,
+                   round(sum(p.area_ha * q.strict_protection_share), 2) AS strict_protection_ha,
+                   count(*) FILTER (q.sustainable_use_share > 0.01) AS sustainable_use,
+                   round(sum(p.area_ha * q.sustainable_use_share), 2) AS sustainable_use_ha
             FROM '{quality_file}' q JOIN p USING (property_code)
             GROUP BY ALL ORDER BY q.municipality_code
         ) TO '{towns_file}' (FORMAT parquet, COMPRESSION zstd)
     """)
-    n, touching, half, out_half = con.execute(f"""
+    n, touching, half, out_half, in_ti, in_pi, in_us = con.execute(f"""
         SELECT count(*), count(*) FILTER (overlap_share > 0.01), count(*) FILTER (overlap_share > 0.5),
-               count(*) FILTER (outside_share > 0.5) FROM '{quality_file}'
+               count(*) FILTER (outside_share > 0.5), count(*) FILTER (indigenous_share > 0.01),
+               count(*) FILTER (strict_protection_share > 0.01), count(*) FILTER (sustainable_use_share > 0.01)
+        FROM '{quality_file}'
     """).fetchone()
     files = {f"quality/state={uf}.parquet": quality_file,
              f"quality-municipalities/state={uf}.parquet": towns_file}
@@ -676,10 +805,14 @@ def quality(uf: str) -> None:
         {"path": key, "bytes": path.stat().st_size, "sha256": sha256(path)} for key, path in files.items()],
         key=lambda f: f["path"])
     cat["states"][uf]["quality_of"] = cat["states"][uf].get("downloaded_to")
+    sources = ROOT / "protected" / "areas.json"
+    if areas and sources.exists():
+        cat["source"]["protected_areas"] = json.loads(sources.read_text())
     s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
     log(f"{uf}: qualidade de {n} imóveis em {time.time() - t0:.0f}s; {touching} com sobreposição acima de 1%, "
-        f"{half} acima de 50%, {out_half} com mais da metade fora do município"
+        f"{half} acima de 50%, {out_half} com mais da metade fora do município; {in_ti} em terra indígena, "
+        f"{in_pi} em proteção integral, {in_us} em uso sustentável"
         + ("" if boundaries else " (sem malha do IBGE)"))
 
 

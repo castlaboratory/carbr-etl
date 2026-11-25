@@ -295,7 +295,10 @@ async function withQuality(rows) {
       const found = new Map((await read(path, { filter })).map((q) => [q.property_code, q]));
       group.forEach((p) => {
         const q = found.get(p.property_code);
-        if (q) Object.assign(p, { overlap_count: Number(q.overlap_count), overlap_share: q.overlap_share, outside_share: q.outside_share });
+        if (q) Object.assign(p, { overlap_count: Number(q.overlap_count), overlap_share: q.overlap_share, outside_share: q.outside_share,
+          indigenous_share: q.indigenous_share, strict_protection_share: q.strict_protection_share,
+          sustainable_use_share: q.sustainable_use_share, indigenous_land: q.indigenous_land,
+          conservation_unit: q.conservation_unit, conservation_category: q.conservation_category });
       });
     } catch (error) {
       console.warn("Indicadores de qualidade indisponíveis", error);
@@ -312,6 +315,20 @@ function overlapText(p) {
 function outsideText(p) {
   if (p.outside_share === undefined || p.outside_share === null) return "—";
   return p.outside_share >= 0.01 ? pct(p.outside_share) : "Nada relevante";
+}
+
+// Terra indígena e unidade de conservação: abaixo de 1% da área é ruído de limite.
+function indigenousText(p) {
+  if (p.indigenous_share === undefined || p.indigenous_share === null) return p.status === "cancelled" ? "Não calculada (cancelado)" : "—";
+  return p.indigenous_share >= 0.01 ? `${p.indigenous_land}: ${pct(p.indigenous_share)}` : "Não";
+}
+const titleCase = (text) => String(text).toLowerCase().replace(/(^|[\s(-])(\p{L})(?=\p{L}{2})/gu, (m, a, b) => a + b.toUpperCase());
+function conservationText(p) {
+  if (p.strict_protection_share === undefined || p.strict_protection_share === null) return p.status === "cancelled" ? "Não calculada (cancelado)" : "—";
+  const strict = p.strict_protection_share >= 0.01, sustainable = p.sustainable_use_share >= 0.01;
+  if (!strict && !sustainable) return "Não";
+  const group = strict ? "proteção integral" : "uso sustentável";
+  return `${titleCase(p.conservation_unit)} (${group}): ${pct(strict ? p.strict_protection_share : p.sustainable_use_share)}`;
 }
 
 // ---- O que cada etapa quer dizer, em linguagem simples ----
@@ -472,6 +489,8 @@ function record(p) {
       <div><dt>Cadastrado em</dt><dd>${created}</dd></div>
       <div><dt>Sobreposta a outros cadastros</dt><dd>${overlapText(p)}</dd></div>
       <div><dt>Fora do município declarado</dt><dd>${outsideText(p)}</dd></div>
+      <div><dt>Em terra indígena</dt><dd>${indigenousText(p)}</dd></div>
+      <div><dt>Em unidade de conservação</dt><dd>${conservationText(p)}</dd></div>
     </dl>`;
   el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
   el.querySelector(".code").textContent = p.property_code;

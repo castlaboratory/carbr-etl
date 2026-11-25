@@ -52,18 +52,30 @@ Ao fim de cada rodada, o histórico e uma cópia datada do catálogo são copiad
 
 ## Indicadores de qualidade
 
-Para cada imóvel não cancelado, `quality` calcula dois sinais de inconsistência do cadastro:
+Para cada imóvel não cancelado, `quality` calcula:
 
 - `overlap_count` e `overlap_share`: com quantos outros imóveis do estado ele divide área, e que
   parcela da área dele está sobreposta (a soma das interseções com cada vizinho, limitada a 1);
-- `outside_share`: que parcela da área fica fora do município declarado, pela malha municipal do IBGE.
+- `outside_share`: que parcela da área fica fora do município declarado, pela malha municipal do IBGE;
+- `indigenous_share`: que parcela fica dentro de terras indígenas, com o nome da principal em
+  `indigenous_land`;
+- `strict_protection_share` e `sustainable_use_share`: que parcela fica dentro de unidades de
+  conservação de proteção integral e de uso sustentável, com o nome e a categoria da principal em
+  `conservation_unit` e `conservation_category` (a de proteção integral, se houver).
 
 ```
 current/
-  quality/state=<UF>.parquet                 property_code, municipality_code e os três indicadores
+  quality/state=<UF>.parquet                 property_code, municipality_code e os indicadores
   quality-municipalities/state=<UF>.parquet  por município: imóveis com sobreposição acima de 1% e de
-                                             50%, hectares sobrepostos, imóveis e hectares fora do município
+                                             50%, hectares sobrepostos, imóveis e hectares fora do município,
+                                             em terra indígena e em unidade de conservação
 ```
+
+As terras indígenas vêm do serviço de mapas da Funai (camada `tis_poligonais`, todas as fases do
+processo); as unidades de conservação, do último shapefile do Cadastro Nacional de Unidades de
+Conservação (CNUC) hospedado no portal de dados do MMA. As duas camadas ficam em `data/protected/`
+por 30 dias, e a edição usada vai para `source.protected_areas` no catálogo. Estar em unidade de uso
+sustentável não é irregularidade: APA e RPPN admitem imóveis privados.
 
 As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
 imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma
