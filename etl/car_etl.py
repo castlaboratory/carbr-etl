@@ -14,6 +14,7 @@
     uv run etl/car_etl.py refresh         # atualização completa: refaz todos os estados
     uv run etl/car_etl.py verify          # confere o bucket contra o catálogo e o Sicar
     uv run etl/car_etl.py summary         # (re)gera o resumo pré-calculado a partir do bucket
+    uv run etl/car_etl.py web             # envia a página de consulta (web/) à raiz do bucket
 
 Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
 O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
@@ -472,6 +473,20 @@ def verify(_ufs: list[str]) -> None:
     print(f"total no bucket {total[0]}; no Sicar agora {total[1]}")
 
 
+def web(_ufs: list[str]) -> None:
+    """Envia a página de consulta (`web/`) à raiz do bucket."""
+    s3, name = bucket()
+    root = ROOT.parent / "web"
+    types = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+             ".css": "text/css; charset=utf-8"}
+    for path in sorted(p for p in root.rglob("*") if p.suffix in types):
+        key = str(path.relative_to(root))
+        s3.upload_file(str(path), name, key, ExtraArgs={
+            "ContentType": types[path.suffix],
+            "CacheControl": "public, max-age=300" if path.suffix == ".html" else "public, max-age=86400"})
+        log(f"enviado {key} ({path.stat().st_size / 1e3:.0f} kB)")
+
+
 def clean(uf: str) -> None:
     """Apaga os dados locais de um estado (brutos e gerados)."""
     for d in (ROOT / "raw" / uf.lower(), ROOT / "release" / uf):
@@ -514,14 +529,14 @@ def run_all(ufs: list[str], refresh: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary"])
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary", "web"])
     ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
     a = ap.parse_args()
     ufs = [u.upper() for u in a.uf]
     if a.step == "refresh":
         run_all(ufs, refresh=True)
-    elif a.step in ("all", "verify", "summary"):
-        {"all": run_all, "verify": verify, "summary": summary}[a.step](ufs)
+    elif a.step in ("all", "verify", "summary", "web"):
+        {"all": run_all, "verify": verify, "summary": summary, "web": web}[a.step](ufs)
     else:
         if not ufs:
             ap.error("informe a UF")

@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>O que está declarado aqui? — consulta ao Cadastro Ambiental Rural</title>
+<meta name="description" content="Clique no mapa ou informe o código de um imóvel para ver o que consta no Cadastro Ambiental Rural (CAR). Dados públicos do Sicar, sem baixar a base inteira.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+<link href="vendor/maplibre-gl.css" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14301f;
+    --paper: #fbfcf8;
+    --line: #cdd6c9;
+    --muted: #4f6155;
+    --parcel: #f2c230;
+    --alert: #c2410c;
+    --ok: #256f36;
+    --water: #1a5f7a;
+    --wash: #eef2ea;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 1rem; line-height: 1.45; color: var(--ink); background: var(--paper);
+    display: grid; grid-template-columns: minmax(22rem, 27rem) 1fr; grid-template-rows: 100%;
+  }
+  h1, h2, h3, p { margin: 0; }
+  a { color: var(--water); }
+  :focus-visible { outline: 3px solid var(--water); outline-offset: 2px; }
+
+  #sheet { overflow-y: auto; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  #sheet > * { padding-inline: 1.5rem; flex-shrink: 0; }
+  #masthead { padding-block: 1.5rem 1.25rem; }
+  #masthead .brand { font-stretch: 75%; font-weight: 700; letter-spacing: .01em; color: var(--muted); }
+  #masthead h1 { font-size: 2.35rem; line-height: 1.02; font-weight: 800; font-stretch: 68%; margin-block: .35rem .6rem; }
+  #masthead p { color: var(--muted); max-width: 34ch; }
+
+  form { display: grid; gap: .4rem; padding-block: .9rem; border-top: 1px solid var(--line); }
+  label { font-weight: 600; }
+  .row { display: flex; gap: .5rem; }
+  input, select, button { font: inherit; color: inherit; }
+  input, select {
+    min-width: 0; flex: 1; padding: .55rem .65rem; background: #fff;
+    border: 1.5px solid var(--ink); border-radius: 2px;
+  }
+  select { flex: 0 0 5.2rem; }
+  button {
+    padding: .55rem .9rem; border: 1.5px solid var(--ink); border-radius: 2px;
+    background: var(--ink); color: var(--paper); font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  button.quiet { background: transparent; color: var(--ink); }
+  button:disabled { opacity: .55; cursor: wait; }
+  .hint { font-size: .875rem; color: var(--muted); }
+
+  #status { padding-block: .9rem; border-top: 1px solid var(--line); min-height: 3.4rem; }
+  #status[data-kind="error"] { color: var(--alert); font-weight: 600; }
+
+  #results { display: grid; gap: 1rem; padding-bottom: 1rem; }
+  #results:empty { display: none; }
+  .overlap { background: var(--parcel); padding: .6rem .8rem; font-weight: 600; }
+
+  /* A ficha: o registro de um imóvel, como numa certidão. */
+  .record { border: 1.5px solid var(--ink); background: #fff; }
+  .record header { padding: .7rem .9rem .6rem; border-bottom: 1.5px solid var(--ink); cursor: pointer; }
+  .record[aria-current="true"] header { background: var(--parcel); }
+  .record h3 { font-size: 1.3rem; font-stretch: 75%; font-weight: 750; line-height: 1.1; }
+  .record .code { font-stretch: 62%; font-size: .9rem; word-break: break-all; color: var(--muted); margin-top: .2rem; }
+  .record[aria-current="true"] .code { color: var(--ink); }
+  .record .plain { padding: .7rem .9rem; background: var(--wash); border-bottom: 1px solid var(--line); }
+  .record .plain strong { display: block; }
+  .record .plain[data-tone="alert"] strong { color: var(--alert); }
+  .record .plain[data-tone="ok"] strong { color: var(--ok); }
+  .record dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; }
+  .record dl div { padding: .5rem .9rem; border-bottom: 1px solid var(--line); }
+  .record dl div:nth-child(odd) { border-right: 1px solid var(--line); }
+  .record dl div:nth-last-child(-n+2) { border-bottom: 0; }
+  .record dt { font-size: .82rem; color: var(--muted); }
+  .record dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+  /* O medidor: quanto esta consulta trouxe, contra o arquivo inteiro. */
+  #meter { padding-block: .9rem 1.1rem; border-top: 1px solid var(--line); }
+  #meter[hidden] { display: none; }
+  #meter .figure { font-size: 1.9rem; font-stretch: 68%; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  #meter .scale { position: relative; height: .9rem; margin-block: .55rem .35rem; background: var(--wash); border: 1px solid var(--line); }
+  #meter .scale i { position: absolute; inset: 0 auto 0 0; min-width: 3px; background: var(--ink); }
+
+  #numbers { padding-block: 1.1rem; border-top: 1px solid var(--line); }
+  #numbers h2 { font-size: 1.25rem; font-stretch: 75%; font-weight: 750; }
+  #numbers .total { color: var(--muted); margin-bottom: .7rem; }
+  #numbers ol { list-style: none; padding: 0; margin: 0; display: grid; gap: .45rem; }
+  #numbers li { display: grid; grid-template-columns: 1fr auto; column-gap: .75rem; align-items: baseline; }
+  #numbers li span:last-of-type { font-variant-numeric: tabular-nums; font-weight: 650; }
+  #numbers li i { grid-column: 1 / -1; height: .5rem; background: var(--ink); min-width: 2px; }
+  #numbers li[data-stage="notified"] i { background: var(--alert); }
+  #numbers li[data-stage="done"] i { background: var(--ok); }
+  #numbers li[data-stage="waiting"] i { background: #8a968d; }
+
+  footer { margin-top: auto; padding-block: 1.1rem 1.5rem; border-top: 1px solid var(--line); font-size: .875rem; color: var(--muted); }
+  footer p + p { margin-top: .5rem; }
+
+  #map { position: relative; min-height: 0; }
+  #map .maplibregl-canvas:focus-visible { outline: 3px solid var(--parcel); outline-offset: -3px; }
+  #basemap { position: absolute; z-index: 2; top: .75rem; left: .75rem; background: var(--paper); color: var(--ink); }
+  #crosshair-tip {
+    position: absolute; z-index: 2; bottom: 2rem; left: 50%; translate: -50% 0; max-width: calc(100% - 2rem);
+    background: var(--ink); color: var(--paper); padding: .5rem .85rem; font-weight: 600; pointer-events: none;
+  }
+  #crosshair-tip[hidden] { display: none; }
+
+  @media (max-width: 52rem) {
+    body { grid-template-columns: 1fr; grid-template-rows: 52vh auto; height: auto; }
+    #map { order: -1; }
+    #sheet { border-right: 0; overflow: visible; }
+    #sheet > * { padding-inline: 1rem; }
+    #masthead h1 { font-size: 1.9rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+
+<main id="sheet">
+  <div id="masthead">
+    <p class="brand">carbr · Cadastro Ambiental Rural</p>
+    <h1>O que está declarado aqui?</h1>
+    <p>Clique num ponto do mapa ou informe o código de um imóvel para ver o que consta no cadastro.</p>
+  </div>
+
+  <form id="by-code">
+    <label for="code">Código do imóvel no CAR</label>
+    <div class="row">
+      <input id="code" name="code" autocomplete="off" spellcheck="false" placeholder="PE-2611101-588BC4…" aria-describedby="code-hint">
+      <button type="submit">Buscar imóvel</button>
+    </div>
+    <p class="hint" id="code-hint">Começa com a sigla do estado, como aparece no recibo do CAR.</p>
+  </form>
+
+  <form id="by-place">
+    <label for="town">Município</label>
+    <div class="row">
+      <select id="state" aria-label="Estado"><option value="">UF</option></select>
+      <input id="town" name="town" list="towns" autocomplete="off" placeholder="Escolha o estado">
+      <datalist id="towns"></datalist>
+      <button type="submit" class="quiet">Ir</button>
+    </div>
+  </form>
+
+  <p id="status" role="status" aria-live="polite">Carregando o catálogo…</p>
+  <section id="results" aria-label="Imóveis encontrados"></section>
+
+  <section id="meter" hidden aria-live="polite">
+    <p class="figure" id="meter-figure"></p>
+    <div class="scale" aria-hidden="true"><i id="meter-bar"></i></div>
+    <p class="hint" id="meter-note"></p>
+  </section>
+
+  <section id="numbers" aria-labelledby="numbers-title">
+    <h2 id="numbers-title">Onde a análise está parada</h2>
+    <p class="total" id="numbers-total">Somando os estados…</p>
+    <ol id="stages"></ol>
+  </section>
+
+  <footer>
+    <p>Fonte: Sicar, Serviço Florestal Brasileiro. Dados de <span id="version">—</span>, atualizados toda semana. O cadastro é autodeclarado: há sobreposições, e constar no CAR não comprova a posse nem a propriedade.</p>
+    <p>Republicação independente, sem caráter oficial; em caso de divergência, vale o Sicar. Não há dados pessoais.</p>
+    <p>Para análises: <a href="https://castlaboratory.github.io/carbr-r/">carbr para R</a> e <a href="https://castlaboratory.github.io/carbr-py/">carbr para Python</a>. Código aberto: <a href="https://github.com/castlaboratory/carbr-etl">carbr-etl</a>.</p>
+  </footer>
+</main>
+
+<div id="map" role="application" aria-label="Mapa. Clique num ponto para consultar os imóveis declarados ali.">
+  <button id="basemap" type="button" class="quiet" aria-pressed="true">Ver mapa de ruas</button>
+  <p id="crosshair-tip">Clique num ponto para consultar</p>
+</div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script type="module">
+import { parquetReadObjects, parquetMetadataAsync, compressors } from "./vendor/parquet.js";
+
+const BASE = new URL("current/", location.href).href;
+const $ = (id) => document.getElementById(id);
+const int = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
+const dec = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const ha = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// ---- Leitura parcial dos arquivos, contando o que cada consulta transfere ----
+const traffic = { bytes: 0, requests: 0 };
+const files = new Map();      // caminho -> { file, metadata }
+let catalog = null;
+let towns = [];               // resumo de todos os municípios
+
+function remoteFile(path) {
+  const url = BASE + path;
+  const byteLength = catalog.files.find((f) => f.path === path).bytes;
+  return {
+    byteLength,
+    async slice(start, end = byteLength) {
+      const response = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
+      if (!response.ok) throw new Error(`HTTP ${response.status} em ${path}`);
+      const buffer = await response.arrayBuffer();
+      traffic.bytes += buffer.byteLength;
+      traffic.requests += 1;
+      return buffer;
+    },
+  };
+}
+
+async function read(path, options = {}) {
+  if (!files.has(path)) {
+    const file = remoteFile(path);
+    files.set(path, { file, metadata: await parquetMetadataAsync(file) });
+  }
+  return parquetReadObjects({ ...files.get(path), compressors, ...options });
+}
+
+const propertiesPath = (uf) => `properties/state=${uf}/part-0.parquet`;
+const FIELDS = ["property_code", "status", "condition", "property_type", "created_at", "area_ha",
+  "fiscal_modules", "size_class", "state", "municipality", "municipality_code"];
+
+// ---- O que cada etapa quer dizer, em linguagem simples ----
+function stageOf(condition) {
+  if (condition.startsWith("Cancelado")) return "cancelled";
+  if (condition === "Aguardando análise") return "waiting";
+  if (condition === "Em análise") return "analysing";
+  if (condition.includes("aguardando atendimento a notificação")) return "notified";
+  if (condition.includes("após revisão")) return "answered";
+  return "done";
+}
+const STAGES = {
+  waiting: { label: "Aguardando análise", tone: "", text: "O órgão ambiental do estado ainda não analisou este cadastro." },
+  analysing: { label: "Em análise", tone: "", text: "O órgão ambiental do estado está analisando este cadastro." },
+  notified: { label: "Notificado, sem resposta", tone: "alert", text: "A análise encontrou pendências e pediu correções. Falta a resposta de quem declarou o imóvel." },
+  answered: { label: "Respondeu, aguarda nova análise", tone: "", text: "Quem declarou já respondeu à notificação. O órgão ambiental precisa analisar de novo." },
+  done: { label: "Analisado", tone: "ok", text: "O órgão ambiental concluiu a análise deste cadastro." },
+  cancelled: { label: "Cancelado", tone: "alert", text: "Este cadastro foi cancelado e não vale como registro do imóvel." },
+};
+const STATUS = { active: "Ativo", pending: "Pendente", suspended: "Suspenso", cancelled: "Cancelado" };
+const TYPES = { rural_property: "Imóvel rural", settlement: "Assentamento da reforma agrária", traditional_community: "Território de povos e comunidades tradicionais" };
+const SIZES = { small: "Pequeno (até 4 módulos fiscais)", medium: "Médio (4 a 15 módulos fiscais)", large: "Grande (mais de 15 módulos fiscais)" };
+
+// ---- Mapa ----
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    sources: {
+      satellite: { type: "raster", tileSize: 256, maxzoom: 18,
+        tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+        attribution: "Imagem: Esri World Imagery" },
+      streets: { type: "raster", tileSize: 256, maxzoom: 19,
+        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        attribution: "© colaboradores do OpenStreetMap" },
+      found: { type: "geojson", data: { type: "FeatureCollection", features: [] }, promoteId: "property_code" },
+    },
+    layers: [
+      { id: "satellite", type: "raster", source: "satellite" },
+      { id: "streets", type: "raster", source: "streets", layout: { visibility: "none" } },
+      { id: "found-fill", type: "fill", source: "found",
+        paint: { "fill-color": "#f2c230", "fill-opacity": ["case", ["boolean", ["feature-state", "current"], false], 0.55, 0.28] } },
+      { id: "found-line", type: "line", source: "found",
+        paint: { "line-color": "#f2c230", "line-width": ["case", ["boolean", ["feature-state", "current"], false], 3.5, 1.2] } },
+    ],
+  },
+  bounds: [[-74, -34], [-34, 5.5]],
+  fitBoundsOptions: { padding: 20 },
+  attributionControl: { compact: true },
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+map.getCanvas().style.cursor = "crosshair";
+let pin = null;
+
+$("basemap").addEventListener("click", () => {
+  const satellite = map.getLayoutProperty("satellite", "visibility") !== "none";
+  map.setLayoutProperty("satellite", "visibility", satellite ? "none" : "visible");
+  map.setLayoutProperty("streets", "visibility", satellite ? "visible" : "none");
+  $("basemap").textContent = satellite ? "Ver imagem de satélite" : "Ver mapa de ruas";
+});
+
+// ---- Geometria: o ponto está dentro do polígono? ----
+function inRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function contains(geometry, x, y) {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  return polygons.some((rings) => inRing(x, y, rings[0]) && !rings.slice(1).some((hole) => inRing(x, y, hole)));
+}
+function boundsOf(features) {
+  const b = new maplibregl.LngLatBounds();
+  const walk = (c) => (typeof c[0] === "number" ? b.extend(c) : c.forEach(walk));
+  features.forEach((f) => walk(f.geometry.coordinates));
+  return b;
+}
+
+// ---- Interface ----
+function say(text, kind = "") { $("status").textContent = text; $("status").dataset.kind = kind; }
+function busy(on) { document.querySelectorAll("form button").forEach((b) => (b.disabled = on)); }
+
+function showMeter(seconds, states) {
+  const whole = states.reduce((sum, uf) => sum + catalog.files.find((f) => f.path === propertiesPath(uf)).bytes, 0);
+  const mb = traffic.bytes / 1e6;
+  $("meter").hidden = false;
+  $("meter-figure").textContent = `${dec.format(mb)} MB em ${dec.format(seconds)} s`;
+  $("meter-bar").style.width = `${Math.min(100, Math.max(0.4, (100 * traffic.bytes) / whole))}%`;
+  const where = states.length === 1 ? `de ${states[0]}` : `de ${states.join(", ")}`;
+  const times = whole / traffic.bytes;
+  $("meter-note").textContent = traffic.bytes === 0
+    ? "Nada foi transferido: a resposta já estava na memória desta página."
+    : times < 1.5
+      ? `Foi o que esta consulta transferiu: praticamente o arquivo inteiro ${where} (${int.format(whole / 1e6)} MB), porque o pedido cobre quase todo o estado.`
+      : `Foi o que esta consulta transferiu. O arquivo completo ${where} tem ${int.format(whole / 1e6)} MB: ${int.format(times)} vezes mais.`;
+}
+
+function record(p) {
+  const stage = STAGES[stageOf(p.condition)];
+  const el = document.createElement("article");
+  el.className = "record";
+  el.dataset.code = p.property_code;
+  const created = p.created_at instanceof Date ? p.created_at.toLocaleDateString("pt-BR") : "—";
+  el.innerHTML = `
+    <header tabindex="0" role="button" aria-label="Destacar este imóvel no mapa">
+      <h3></h3><p class="code"></p>
+    </header>
+    <p class="plain" data-tone="${stage.tone}"><strong></strong><span></span></p>
+    <dl>
+      <div><dt>Situação do cadastro</dt><dd>${STATUS[p.status] ?? "Não informada"}</dd></div>
+      <div><dt>Área declarada</dt><dd>${ha.format(p.area_ha)} ha</dd></div>
+      <div><dt>Porte</dt><dd>${SIZES[p.size_class] ?? "—"}</dd></div>
+      <div><dt>Módulos fiscais</dt><dd>${ha.format(p.fiscal_modules)}</dd></div>
+      <div><dt>Tipo</dt><dd>${TYPES[p.property_type] ?? "—"}</dd></div>
+      <div><dt>Cadastrado em</dt><dd>${created}</dd></div>
+    </dl>`;
+  el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
+  el.querySelector(".code").textContent = p.property_code;
+  el.querySelector("strong").textContent = stage.label;
+  el.querySelector(".plain span").textContent = `${stage.text} No Sicar: “${p.condition}”.`;
+  const pick = () => highlight(p.property_code, true);
+  el.querySelector("header").addEventListener("click", pick);
+  el.querySelector("header").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+  return el;
+}
+
+let current = null;
+let shown = [];
+function highlight(code, zoom = false) {
+  if (current) map.setFeatureState({ source: "found", id: current }, { current: false });
+  current = code;
+  map.setFeatureState({ source: "found", id: code }, { current: true });
+  document.querySelectorAll(".record").forEach((r) => r.setAttribute("aria-current", String(r.dataset.code === code)));
+  if (zoom) map.fitBounds(boundsOf(shown.filter((f) => f.properties.property_code === code)), { padding: 60, maxZoom: 15 });
+}
+
+function show(rows, { cards = true } = {}) {
+  shown = rows.map(({ geometry, ...properties }) => ({ type: "Feature", geometry,
+    properties: { ...properties, created_at: String(properties.created_at) } }));
+  current = null;
+  map.getSource("found").setData({ type: "FeatureCollection", features: shown });
+  const list = $("results");
+  list.replaceChildren();
+  if (!cards || rows.length === 0) return;
+  if (rows.length > 1) {
+    const note = document.createElement("p");
+    note.className = "overlap";
+    note.textContent = `${rows.length} cadastros cobrem este ponto. Como o CAR é autodeclarado, sobreposições acontecem; a análise do órgão ambiental é que resolve.`;
+    list.append(note);
+  }
+  rows.forEach((p) => list.append(record(p)));
+  map.once("idle", () => highlight(rows[0].property_code));
+}
+
+let running = false;
+async function consult(states, run) {
+  running = true;
+  busy(true);
+  $("crosshair-tip").hidden = true;
+  traffic.bytes = 0; traffic.requests = 0;
+  const started = performance.now();
+  try {
+    await run();
+    showMeter((performance.now() - started) / 1000, states);
+  } catch (error) {
+    console.error(error);
+    say("Não foi possível ler os dados agora. Confira a conexão e tente de novo.", "error");
+  } finally {
+    running = false;
+    busy(false);
+  }
+}
+
+// ---- Consulta por ponto ----
+map.on("click", (event) => {
+  if (running) return;                // uma consulta por vez
+  const { lng: x, lat: y } = event.lngLat;
+  const states = [...new Set(towns.filter((t) => t.xmin <= x && t.xmax >= x && t.ymin <= y && t.ymax >= y).map((t) => t.state))];
+  pin?.remove();
+  pin = new maplibregl.Marker({ color: "#14301f" }).setLngLat([x, y]).addTo(map);
+  if (states.length === 0) {
+    show([]); $("meter").hidden = true;
+    say(towns.length ? "Nenhum imóvel declarado neste ponto." : "O catálogo ainda está carregando; tente em alguns segundos.");
+    return;
+  }
+  say("Consultando os imóveis declarados neste ponto…");
+  consult(states, async () => {
+    const filter = { xmin: { $lte: x }, xmax: { $gte: x }, ymin: { $lte: y }, ymax: { $gte: y } };
+    const parts = await Promise.all(states.map((uf) => read(propertiesPath(uf), { columns: [...FIELDS, "geometry"], filter })));
+    const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y)).sort((a, b) => a.area_ha - b.area_ha);
+    show(rows);
+    if (rows.length) {
+      map.fitBounds(boundsOf(shown), { padding: 60, maxZoom: 15 });
+      say(rows.length === 1 ? "1 imóvel declarado neste ponto." : `${rows.length} imóveis declarados neste ponto.`);
+    } else {
+      say("Nenhum imóvel declarado neste ponto.");
+    }
+  });
+});
+map.on("click", "found-fill", (event) => {
+  if (shown.length > 50) return;      // na visão do município, o clique consulta o ponto
+  const code = event.features[0].properties.property_code;
+  highlight(code);
+  document.querySelector(`.record[data-code="${code}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+});
+
+// ---- Consulta por código ----
+$("by-code").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (running) return;
+  const code = $("code").value.trim().toUpperCase();
+  if (!/^[A-Z]{2}-\d{7}-[0-9A-F]{32}$/.test(code)) {
+    say("Confira o código: são a sigla do estado, 7 números e 32 letras ou números, separados por hífen.", "error");
+    $("code").focus();
+    return;
+  }
+  const uf = code.slice(0, 2);
+  if (!catalog.states[uf]) { say(`Não há dados de ${uf} nesta publicação.`, "error"); return; }
+  say("Procurando o imóvel…");
+  consult([uf], async () => {
+    const columns = [...FIELDS, "geometry"];
+    let rows = await read(propertiesPath(uf), { columns,
+      filter: { municipality_code: { $eq: Number(code.slice(3, 10)) }, property_code: { $eq: code } } });
+    // Alguns imóveis estão registrados em município diferente do que o código indica.
+    if (rows.length === 0) rows = await read(propertiesPath(uf), { columns, filter: { property_code: { $eq: code } } });
+    pin?.remove();
+    show(rows);
+    if (rows.length) {
+      map.fitBounds(boundsOf(shown), { padding: 60, maxZoom: 15 });
+      say("Imóvel encontrado.");
+    } else {
+      say("Não há imóvel com esse código nesta publicação. Ele pode ter sido cadastrado depois da última atualização.");
+    }
+  });
+});
+
+// ---- Município ----
+$("state").addEventListener("change", () => {
+  const uf = $("state").value;
+  $("towns").replaceChildren(...towns.filter((t) => t.state === uf).map((t) => new Option(t.municipality)));
+  $("town").value = "";
+  $("town").placeholder = uf ? "Nome do município" : "Escolha o estado";
+});
+const fold = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+$("by-place").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (running) return;
+  const uf = $("state").value;
+  const town = towns.find((t) => t.state === uf && fold(t.municipality) === fold($("town").value));
+  if (!town) { say("Escolha o estado e um município da lista.", "error"); return; }
+  pin?.remove();
+  say(`Carregando os imóveis de ${town.municipality}…`);
+  consult([uf], async () => {
+    const rows = await read(propertiesPath(uf), { columns: [...FIELDS, "geometry"],
+      filter: { municipality_code: { $eq: town.municipality_code } } });
+    show(rows.filter((p) => p.geometry), { cards: false });
+    map.fitBounds([[town.xmin, town.ymin], [town.xmax, town.ymax]], { padding: 30 });
+    const small = Math.round((100 * town.small_properties) / town.properties);
+    say(`${town.municipality}, ${uf}: ${int.format(town.properties)} imóveis declarados, ${small}% deles pequenos, somando ${int.format(town.area_ha)} hectares. Clique num ponto para ver o que está declarado ali.`);
+  });
+});
+
+// ---- Arranque: catálogo, municípios e o resumo nacional ----
+async function start() {
+  catalog = await (await fetch(BASE + "catalog.json", { cache: "no-cache" })).json();
+  const states = Object.keys(catalog.states);
+  $("version").textContent = catalog.version.split("-").reverse().join("/");
+  $("state").append(...states.map((uf) => new Option(uf, uf)));
+  const total = states.reduce((sum, uf) => sum + catalog.states[uf].properties, 0);
+  say(`${int.format(total)} imóveis de ${states.length} estados prontos para consulta.`);
+
+  const numeric = (row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === "bigint" ? Number(v) : v]));
+  Promise.all(states.map((uf) => read(`municipalities/state=${uf}.parquet`))).then((parts) => {
+    towns = parts.flat().map(numeric);
+  });
+
+  const summary = (await Promise.all(states.map((uf) => read(`summary/state=${uf}.parquet`, { columns: ["condition", "properties"] })))).flat();
+  const byStage = {};
+  summary.forEach((row) => { const s = stageOf(row.condition); byStage[s] = (byStage[s] ?? 0) + Number(row.properties); });
+  const largest = Math.max(...Object.values(byStage));
+  $("numbers-total").textContent = `De cada 100 imóveis no CAR, ${Math.round((100 * byStage.waiting) / total)} ainda esperam a análise e ${Math.round((100 * byStage.notified) / total)} foram notificados e não responderam.`;
+  $("stages").replaceChildren(...Object.keys(STAGES).map((key) => {
+    const li = document.createElement("li");
+    li.dataset.stage = key;
+    li.innerHTML = `<span></span><span>${int.format(byStage[key] ?? 0)}</span><i style="width:${(100 * (byStage[key] ?? 0)) / largest}%"></i>`;
+    li.firstChild.textContent = STAGES[key].label;
+    return li;
+  }));
+}
+start().catch((error) => {
+  console.error(error);
+  say("Não foi possível carregar o catálogo. Recarregue a página em alguns instantes.", "error");
+});
+</script>
+</body>
+</html>

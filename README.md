@@ -47,6 +47,18 @@ uv run etl/car_etl.py summary        # regera o resumo pré-calculado a partir d
 
 Os passos também rodam separados: `download UF`, `build UF`, `publish UF`, `clean UF`.
 
+## Página de consulta
+
+`web/` é uma página estática, servida do mesmo endereço dos dados
+(<https://car.castlab.org/index.html>): clicar num ponto do mapa, informar o código de um imóvel ou
+escolher um município mostra o que está declarado, em linguagem simples. Ela lê os mesmos arquivos
+Parquet direto do navegador, por requisições parciais, sem servidor de aplicação, e mostra quanto
+cada consulta transferiu. As bibliotecas ficam em `web/vendor/` (ver o README de lá).
+
+```bash
+uv run etl/car_etl.py web            # envia web/ à raiz do bucket
+```
+
 ## Agendamento
 
 `deploy/` traz um serviço e um timer de usuário do systemd para a atualização semanal
