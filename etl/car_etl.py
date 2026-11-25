@@ -926,6 +926,7 @@ def typology(_ufs: list[str] | None = None) -> None:
     features, floor = ref["features"], ref["min_properties"]
     con, url = remote_duck(name)
     con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+    con.execute("SET geometry_always_xy = true")      # a área na superfície da Terra lê longitude, latitude
     con.execute("""CREATE TABLE town (state VARCHAR, municipality_code INTEGER, municipality VARCHAR,
         properties BIGINT, area_ha DOUBLE, small BIGINT, large_ha DOUBLE, waiting BIGINT, notified BIGINT,
         analysed BIGINT)""")
@@ -946,9 +947,8 @@ def typology(_ufs: list[str] | None = None) -> None:
         """)
         boundaries = mesh(uf)
         if boundaries:
-            # Área na superfície da Terra; a função espera latitude antes de longitude.
             con.execute(f"""INSERT INTO territory SELECT codarea::INTEGER,
-                ST_Area_Spheroid(ST_FlipCoordinates(ST_MakeValid(geom)::GEOMETRY)) / 1e4 FROM ST_Read('{boundaries}')""")
+                ST_Area_Spheroid(ST_MakeValid(geom)::GEOMETRY) / 1e4 FROM ST_Read('{boundaries}')""")
     quality_files = [url(f"quality-municipalities/state={uf}.parquet") for uf in states
                      if any(f["path"] == f"quality-municipalities/state={uf}.parquet" for f in cat["files"])]
     con.execute(f"""
