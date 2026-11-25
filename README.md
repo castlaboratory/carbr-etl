@@ -1,5 +1,8 @@
 # carbr-etl
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24532759.svg)](https://doi.org/10.5281/zenodo.24532759)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Republica os imóveis rurais do **Cadastro Ambiental Rural (CAR)** — os dados públicos do Sicar, do
 Serviço Florestal Brasileiro — como GeoParquet num bucket compatível com S3. É a origem dos dados
 dos pacotes [carbr para R](https://github.com/StrategicProjects/carbr-r) e
@@ -68,5 +71,10 @@ O serviço espera o repositório em `~/carbr-etl`.
   atualização baixa tudo de novo.
 - A publicação traz o perímetro declarado e dez atributos de cada imóvel. Não há dado pessoal.
 - O cadastro é autodeclarado: há sobreposições, e a presença no CAR não comprova domínio.
+
+## Como citar
+
+Arquivado no Zenodo: [doi:10.5281/zenodo.24532759](https://doi.org/10.5281/zenodo.24532759) (o DOI aponta sempre para a versão
+mais recente).
 
 Código sob licença MIT.

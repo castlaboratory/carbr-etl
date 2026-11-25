@@ -5,6 +5,7 @@ title: "carbr-etl: republishing the Rural Environmental Registry of Brazil (CAR)
 version: 0.1.0
 date-released: 2026-11-25
 license: MIT
+doi: 10.5281/zenodo.24532759
 repository-code: "https://github.com/StrategicProjects/carbr-etl"
 url: "https://github.com/StrategicProjects/carbr-etl"
 keywords:
