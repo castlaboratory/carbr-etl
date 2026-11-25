@@ -1,0 +1,514 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["duckdb>=1.1", "boto3>=1.34"]
+# ///
+"""ETL dos imóveis do CAR: geoserviço público do Sicar -> GeoParquet -> bucket.
+
+    uv run etl/car_etl.py download PE     # baixa as páginas brutas (retoma de onde parou)
+    uv run etl/car_etl.py build PE        # gera os arquivos do estado em data/release/PE/
+    uv run etl/car_etl.py publish PE      # envia o estado ao bucket e atualiza o catálogo
+    uv run etl/car_etl.py all             # todos os estados que faltam, um por vez,
+                                          # apagando os dados locais depois de cada envio
+    uv run etl/car_etl.py all BA MG       # só esses (refaz mesmo se já publicados)
+    uv run etl/car_etl.py refresh         # atualização completa: refaz todos os estados
+    uv run etl/car_etl.py verify          # confere o bucket contra o catálogo e o Sicar
+    uv run etl/car_etl.py summary         # (re)gera o resumo pré-calculado a partir do bucket
+
+Fonte: WFS público do Sicar, uma camada por UF (sicar:sicar_imoveis_<uf>).
+O download é sequencial, com pausa entre as páginas, para não pesar no servidor.
+A paginação é por chave (cod_imovel > último lido): o tempo por página não cresce
+e inserções no meio do download não deslocam as páginas.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+WFS = "https://geoserver.car.gov.br/geoserver/sicar/wfs"
+ROOT = Path(__file__).resolve().parent.parent / "data"
+PAGE = 5000
+PAUSE_S = 2
+USER_AGENT = "carbr-etl/0.1 (+https://github.com/StrategicProjects/carbr-etl)"
+# Um estado cuja contagem nova fique abaixo desta fração da publicada não é substituído.
+MIN_RATIO = 0.95
+# Download parcial mais velho que isto é descartado antes de recomeçar (horas).
+STALE_HOURS = 36
+# Do menor para o maior (contagem de 24/11/2026).
+STATES = ["AP", "DF", "RR", "AC", "RJ", "MS", "AM", "TO", "RN", "SE", "ES", "AL", "RO", "PB",
+          "MT", "GO", "PI", "PA", "CE", "MA", "PE", "SC", "SP", "PR", "RS", "MG", "BA"]
+
+# nome publicado -> (nome no Sicar, descrição)
+DICTIONARY = [
+    ("property_code", "cod_imovel", "Código do imóvel no CAR (UF-município IBGE-identificador)."),
+    ("status_code", "status_imovel", "Situação do cadastro: AT ativo, PE pendente, SU suspenso, CA cancelado."),
+    ("status", None, "Situação do cadastro por extenso, derivada de status_code."),
+    ("condition", "condicao", "Etapa da análise em que o cadastro está, como informada pelo Sicar."),
+    ("property_type_code", "tipo_imovel", "IRU imóvel rural, AST assentamento, PCT povos e comunidades tradicionais."),
+    ("property_type", None, "Tipo do imóvel por extenso, derivado de property_type_code."),
+    ("created_at", "dat_criacao", "Data e hora de criação do cadastro (UTC)."),
+    ("area_ha", "area", "Área declarada do imóvel, em hectares."),
+    ("fiscal_modules", "m_fiscal", "Área em módulos fiscais do município."),
+    ("size_class", None, "small até 4 módulos fiscais, medium acima de 4 até 15, large acima de 15."),
+    ("state", "uf", "UF onde o imóvel está localizado."),
+    ("municipality", "municipio", "Município onde o imóvel está localizado."),
+    ("municipality_code", "cod_municipio_ibge", "Código IBGE do município (7 dígitos)."),
+    ("registration_state", None, "UF do prefixo de property_code; pode diferir de state."),
+    ("lon", None, "Longitude de um ponto dentro do imóvel (SIRGAS 2000)."),
+    ("lat", None, "Latitude de um ponto dentro do imóvel (SIRGAS 2000)."),
+    ("geometry_valid", None, "Se a geometria declarada é válida (sem autointerseção etc.)."),
+    ("xmin", None, "Limite oeste do retângulo envolvente do imóvel, para filtro espacial na leitura."),
+    ("ymin", None, "Limite sul do retângulo envolvente."),
+    ("xmax", None, "Limite leste do retângulo envolvente."),
+    ("ymax", None, "Limite norte do retângulo envolvente."),
+    ("geometry", "geo_area_imovel", "Perímetro declarado do imóvel, WKB, EPSG:4674. Nulo se o Sicar não traz."),
+]
+
+
+# Resumo pré-calculado: uma linha por combinação, para agregações nacionais sem ler os imóveis.
+SUMMARY_SQL = """
+    SELECT state, status, size_class, property_type, condition,
+           year(created_at AT TIME ZONE 'UTC')::INTEGER AS created_year,
+           count(*) AS properties, sum(area_ha) AS area_ha
+    FROM {src} GROUP BY ALL ORDER BY ALL
+"""
+
+
+def log(msg: str) -> None:
+    print(f"{dt.datetime.now():%H:%M:%S} {msg}", flush=True)
+
+
+def curl(params: dict[str, str], dest: Path) -> int:
+    args = ["curl", "-sS", "--fail", "--compressed", "-m", "900", "-A", USER_AGENT, "-G", WFS,
+            "-o", str(dest)]
+    for k, v in params.items():
+        args += ["--data-urlencode", f"{k}={v}"]
+    return subprocess.run(args).returncode
+
+
+def fetch(params: dict[str, str], dest: Path, tries: int = 8) -> dict:
+    """Baixa uma página para `dest` e devolve o JSON já conferido."""
+    tmp = dest.with_suffix(".part")
+    for attempt in range(1, tries + 1):
+        rc = curl(params, tmp)
+        if rc == 0:
+            try:
+                page = json.loads(tmp.read_text())
+                if "features" in page:
+                    tmp.rename(dest)
+                    return page
+            except json.JSONDecodeError:
+                pass
+        wait = min(60 * attempt, 600)
+        log(f"  falhou (curl rc={rc}), tentativa {attempt}/{tries}; nova tentativa em {wait}s")
+        time.sleep(wait)
+    raise SystemExit(f"desisti de {dest.name} após {tries} tentativas")
+
+
+def hits(layer: str, tmp: Path) -> int | None:
+    """Total de feições da camada, como o Sicar informa agora."""
+    rc = curl({"service": "WFS", "version": "2.0.0", "request": "GetFeature",
+               "typeNames": layer, "resultType": "hits"}, tmp)
+    m = re.search(r'numberMatched="(\d+)"', tmp.read_text()) if rc == 0 else None
+    tmp.unlink(missing_ok=True)
+    return int(m.group(1)) if m else None
+
+
+def download(uf: str) -> None:
+    raw = ROOT / "raw" / uf.lower()
+    raw.mkdir(parents=True, exist_ok=True)
+    manifest_path = raw / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    layer = f"sicar:sicar_imoveis_{uf.lower()}"
+    base = {
+        "service": "WFS",
+        "version": "2.0.0",
+        "request": "GetFeature",
+        "typeNames": layer,
+        "sortBy": "cod_imovel",
+        "outputFormat": "application/json",
+        "count": str(PAGE),
+    }
+    if "started_at" not in manifest:
+        manifest |= {"started_at": dt.datetime.now(dt.UTC).isoformat(),
+                     "matched_at_start": hits(layer, raw / "hits.tmp"), "paging": "keyset"}
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+    total, n, last = 0, 0, None
+    while True:
+        dest = raw / f"page_{n:04d}.geojson"
+        if dest.exists():
+            page = json.loads(dest.read_text())
+        else:
+            t0 = time.time()
+            params = base if last is None else base | {"cql_filter": f"cod_imovel > '{last}'"}
+            page = fetch(params, dest)
+            log(f"{uf} {dest.name}: {len(page['features'])} feições em {time.time() - t0:.0f}s "
+                f"({total + len(page['features'])} de {manifest.get('matched_at_start')})")
+            time.sleep(PAUSE_S)
+        got = len(page["features"])
+        total += got
+        n += 1
+        if got < PAGE:
+            break
+        last = page["features"][-1]["properties"]["cod_imovel"]
+    manifest |= {"finished_at": dt.datetime.now(dt.UTC).isoformat(),
+                 "matched_at_end": hits(layer, raw / "hits.tmp"),
+                 "pages": n, "features": total, "page_size": PAGE, "source": WFS, "layer": layer}
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    log(f"{uf}: {total} feições em {n} páginas")
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build(uf: str) -> None:
+    import duckdb
+
+    raw = ROOT / "raw" / uf.lower()
+    manifest = json.loads((raw / "manifest.json").read_text())
+    if "features" not in manifest:
+        raise SystemExit("download incompleto: rode `download` até o fim antes do `build`")
+    out = ROOT / "release" / uf
+    out.mkdir(parents=True, exist_ok=True)
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    select = """
+        SELECT cod_imovel AS property_code, status_imovel AS status_code, condicao AS condition,
+               tipo_imovel AS property_type_code, dat_criacao AS created_at, area AS area_ha,
+               m_fiscal AS fiscal_modules, uf AS state, municipio AS municipality,
+               cod_municipio_ibge AS municipality_code, geom AS geometry
+        FROM ST_Read(?)
+    """
+    pages = sorted(raw.glob("page_*.geojson"))
+    con.execute(f"CREATE TABLE src AS {select}", [str(pages[0])])
+    for page in pages[1:]:
+        con.execute(f"INSERT INTO src {select}", [str(page)])
+    raw_rows, distinct_codes = con.execute(
+        "SELECT count(*), count(DISTINCT property_code) FROM src"
+    ).fetchone()
+
+    con.execute(
+        """
+        CREATE TABLE properties AS
+        WITH dedup AS (
+            SELECT * FROM src
+            QUALIFY row_number() OVER (PARTITION BY property_code ORDER BY created_at DESC) = 1
+        ), g AS (
+            SELECT *, ST_IsValid(geometry) AS geometry_valid,
+                   CASE WHEN ST_IsValid(geometry) THEN ST_PointOnSurface(geometry)
+                        ELSE ST_Centroid(geometry) END AS pt
+            FROM dedup
+        )
+        SELECT
+            property_code,
+            status_code,
+            CASE status_code WHEN 'AT' THEN 'active' WHEN 'PE' THEN 'pending'
+                             WHEN 'SU' THEN 'suspended' WHEN 'CA' THEN 'cancelled' END AS status,
+            condition,
+            property_type_code,
+            CASE property_type_code WHEN 'IRU' THEN 'rural_property' WHEN 'AST' THEN 'settlement'
+                                    WHEN 'PCT' THEN 'traditional_community' END AS property_type,
+            created_at,
+            area_ha,
+            fiscal_modules,
+            CASE WHEN fiscal_modules <= 4 THEN 'small' WHEN fiscal_modules <= 15 THEN 'medium'
+                 ELSE 'large' END AS size_class,
+            state,
+            municipality,
+            municipality_code,
+            split_part(property_code, '-', 1) AS registration_state,
+            ST_X(pt) AS lon,
+            ST_Y(pt) AS lat,
+            geometry_valid,
+            ST_XMin(geometry) AS xmin, ST_YMin(geometry) AS ymin,
+            ST_XMax(geometry) AS xmax, ST_YMax(geometry) AS ymax,
+            geometry
+        FROM g
+        """
+    )
+
+    # Ordem: município, depois curva de Hilbert. Grupos de linhas pequenos deixam o leitor
+    # remoto pular quase tudo num filtro por município ou por bbox.
+    xmin, ymin, xmax, ymax = con.execute(
+        "SELECT min(xmin), min(ymin), max(xmax), max(ymax) FROM properties"
+    ).fetchone()
+    props_file = out / "properties.parquet"
+    con.execute(
+        f"""
+        COPY (
+            SELECT * FROM properties
+            ORDER BY municipality_code,
+                     ST_Hilbert(lon, lat, {{min_x: {xmin}, min_y: {ymin}, max_x: {xmax}, max_y: {ymax}}}::BOX_2D)
+        ) TO '{props_file}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 4096)
+        """
+    )
+
+    muni_file = out / "municipalities.parquet"
+    con.execute(
+        f"""
+        COPY (
+            SELECT state, municipality_code, municipality,
+                   count(*) AS properties,
+                   count(*) FILTER (size_class = 'small') AS small_properties,
+                   sum(area_ha) AS area_ha,
+                   count(*) FILTER (status = 'active') AS active,
+                   count(*) FILTER (status = 'pending') AS pending,
+                   count(*) FILTER (status = 'suspended') AS suspended,
+                   count(*) FILTER (status = 'cancelled') AS cancelled,
+                   count(*) FILTER (NOT geometry_valid) AS invalid_geometries,
+                   min(xmin) AS xmin, min(ymin) AS ymin,
+                   max(xmax) AS xmax, max(ymax) AS ymax
+            FROM properties GROUP BY ALL ORDER BY municipality_code
+        ) TO '{muni_file}' (FORMAT parquet, COMPRESSION zstd)
+        """
+    )
+
+    summary_file = out / "summary.parquet"
+    con.execute(f"COPY ({SUMMARY_SQL.format(src='properties')}) TO '{summary_file}' "
+                "(FORMAT parquet, COMPRESSION zstd)")
+
+    def count(where: str = "TRUE") -> int:
+        return con.execute(f"SELECT count(*) FROM properties WHERE {where}").fetchone()[0]
+
+    quality = {
+        "raw_rows": raw_rows,
+        "distinct_property_codes": distinct_codes,
+        "duplicates_removed": raw_rows - count(),
+        "matched_at_start": manifest.get("matched_at_start"),
+        "matched_at_end": manifest.get("matched_at_end"),
+        "null_geometries": count("geometry IS NULL"),
+        "invalid_geometries": count("NOT geometry_valid"),
+        "unmapped_status_codes": count("status IS NULL"),
+        "unmapped_property_types": count("property_type IS NULL"),
+        "registered_in_other_state": count("registration_state <> state"),
+    }
+    state = {
+        "properties": count(),
+        "municipalities": con.execute(
+            "SELECT count(DISTINCT municipality_code) FROM properties").fetchone()[0],
+        "layer": manifest["layer"],
+        "downloaded_from": manifest.get("started_at"),
+        "downloaded_to": manifest.get("finished_at"),
+        "quality": quality,
+        "files": [
+            {"path": key, "bytes": p.stat().st_size, "sha256": sha256(p)}
+            for key, p in ((f"properties/state={uf}/part-0.parquet", props_file),
+                           (f"municipalities/state={uf}.parquet", muni_file),
+                           (f"summary/state={uf}.parquet", summary_file))
+        ],
+    }
+    (out / "state.json").write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    log(f"{uf}: {state['properties']} imóveis, {props_file.stat().st_size / 1e6:.0f} MB em {out}")
+
+
+def bucket():
+    """Cliente S3 e nome do bucket, das credenciais em `.env` na raiz do projeto."""
+    import boto3
+    from urllib.parse import urlparse
+
+    env = {}
+    for line in (ROOT.parent / ".env").read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip("'\"")
+    endpoint = urlparse(env["R2_S3API"])
+    s3 = boto3.client(
+        "s3", endpoint_url=f"{endpoint.scheme}://{endpoint.hostname}", region_name="auto",
+        aws_access_key_id=env["ACESS_KEY_ID"], aws_secret_access_key=env["SECRET_ACESS_KEY"],
+    )
+    return s3, env.get("R2_BUCKET", "car")
+
+
+def remote_catalog(s3, name: str) -> dict:
+    try:
+        return json.loads(s3.get_object(Bucket=name, Key="current/catalog.json")["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        return {"states": {}, "files": []}
+
+
+def publish(uf: str) -> None:
+    """Envia um estado ao bucket, sob `current/`, e acrescenta-o ao catálogo.
+
+    O catálogo vai por último: quem lê nunca vê um catálogo que aponta para arquivo
+    ainda não enviado. Cada envio é conferido pelo tamanho antes de seguir.
+    """
+    s3, name = bucket()
+    out = ROOT / "release" / uf
+    state = json.loads((out / "state.json").read_text())
+    previous = remote_catalog(s3, name)["states"].get(uf, {}).get("properties")
+    if previous and state["properties"] < MIN_RATIO * previous:
+        raise RuntimeError(
+            f"{uf}: {state['properties']} imóveis agora, {previous} publicados; "
+            "queda acima do limite, estado não substituído"
+        )
+    local = {f"properties/state={uf}/part-0.parquet": out / "properties.parquet",
+             f"municipalities/state={uf}.parquet": out / "municipalities.parquet",
+             f"summary/state={uf}.parquet": out / "summary.parquet"}
+    for key, path in local.items():
+        s3.upload_file(str(path), name, f"current/{key}",
+                       ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+        size = s3.head_object(Bucket=name, Key=f"current/{key}")["ContentLength"]
+        if size != path.stat().st_size:
+            raise SystemExit(f"{key}: {size} bytes no bucket, {path.stat().st_size} aqui")
+        log(f"enviado current/{key} ({size / 1e6:.1f} MB)")
+    s3.put_object(Bucket=name, Key="current/dictionary.json", ContentType="application/json",
+                  Body=json.dumps([{"column": c, "sicar_name": n, "description": d}
+                                   for c, n, d in DICTIONARY], indent=2, ensure_ascii=False).encode())
+    cat = remote_catalog(s3, name)
+    files = state.pop("files")
+    cat["states"][uf] = state
+    cat["states"] = {k: cat["states"][k] for k in sorted(cat["states"])}
+    cat["files"] = sorted([f for f in cat["files"] if f["path"] not in local] + files,
+                          key=lambda f: f["path"])
+    cat["version"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
+    cat["source"] = {"name": "SFB / Sicar — Cadastro Ambiental Rural", "url": WFS}
+    cat["crs"] = "EPSG:4674"
+    s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
+                  Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
+    log(f"{uf} no catálogo; {len(cat['states'])} estados publicados, versão {cat['version']}")
+
+
+def env_file() -> dict:
+    env = {}
+    for line in (ROOT.parent / ".env").read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip("'\"")
+    return env
+
+
+def remote_duck(name: str):
+    """DuckDB que lê o bucket pela API S3 (sem passar pelo endereço público)."""
+    import duckdb
+    from urllib.parse import urlparse
+
+    env = env_file()
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(
+        f"CREATE SECRET (TYPE s3, KEY_ID '{env['ACESS_KEY_ID']}', SECRET '{env['SECRET_ACESS_KEY']}', "
+        f"ENDPOINT '{urlparse(env['R2_S3API']).hostname}', REGION 'auto', URL_STYLE 'path')"
+    )
+    return con, lambda key: f"s3://{name}/current/{key}"
+
+
+def summary(ufs: list[str]) -> None:
+    """(Re)gera o resumo de estados já publicados, lendo os imóveis do bucket."""
+    s3, name = bucket()
+    cat = remote_catalog(s3, name)
+    con, url = remote_duck(name)
+    tmp = ROOT / "release" / "_summary.parquet"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    for uf in ufs or list(cat["states"]):
+        key = f"summary/state={uf}.parquet"
+        src = f"read_parquet('{url(f'properties/state={uf}/part-0.parquet')}')"
+        con.execute(f"COPY ({SUMMARY_SQL.format(src=src)}) TO '{tmp}' (FORMAT parquet, COMPRESSION zstd)")
+        rows, props = con.execute(f"SELECT count(*), sum(properties) FROM '{tmp}'").fetchone()
+        if props != cat["states"][uf]["properties"]:
+            raise SystemExit(f"{uf}: resumo soma {props}, catálogo diz {cat['states'][uf]['properties']}")
+        s3.upload_file(str(tmp), name, f"current/{key}",
+                       ExtraArgs={"ContentType": "application/vnd.apache.parquet"})
+        cat["files"] = [f for f in cat["files"] if f["path"] != key] + [
+            {"path": key, "bytes": tmp.stat().st_size, "sha256": sha256(tmp)}]
+        log(f"{uf}: resumo com {rows} linhas, {props} imóveis")
+    tmp.unlink(missing_ok=True)
+    cat["files"].sort(key=lambda f: f["path"])
+    cat["version"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
+    s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
+                  Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
+    log("catálogo atualizado")
+
+
+def verify(_ufs: list[str]) -> None:
+    """Confere cada estado: linhas no arquivo do bucket, catálogo e total atual do Sicar."""
+    s3, name = bucket()
+    cat = remote_catalog(s3, name)
+    con, url = remote_duck(name)
+    missing = [uf for uf in STATES if uf not in cat["states"]]
+    print(f"estados no catálogo: {len(cat['states'])} de {len(STATES)}; faltando: {missing}")
+    print("UF   no_arquivo  códigos_distintos  catálogo  sicar_agora  diferença")
+    total = [0, 0]
+    for uf in sorted(cat["states"]):
+        f = url(f"properties/state={uf}/part-0.parquet")
+        rows, codes, states = con.execute(
+            f"SELECT count(*), count(DISTINCT property_code), count(DISTINCT state) FROM '{f}'"
+        ).fetchone()
+        now = hits(f"sicar:sicar_imoveis_{uf.lower()}", ROOT / "hits.tmp")
+        declared = cat["states"][uf]["properties"]
+        flag = "" if rows == codes == declared and states == 1 else "  <-- conferir"
+        print(f"{uf}  {rows:>10}  {codes:>10}  {declared:>10}  {now!s:>10}  {(now or 0) - rows:>+6}{flag}")
+        total[0] += rows
+        total[1] += now or 0
+    print(f"total no bucket {total[0]}; no Sicar agora {total[1]}")
+
+
+def clean(uf: str) -> None:
+    """Apaga os dados locais de um estado (brutos e gerados)."""
+    for d in (ROOT / "raw" / uf.lower(), ROOT / "release" / uf):
+        if d.exists():
+            shutil.rmtree(d)
+    log(f"{uf}: dados locais apagados")
+
+
+def stale(uf: str) -> bool:
+    """Há um download parcial antigo deste estado? Misturá-lo com páginas novas daria um
+    retrato de duas datas."""
+    manifest = ROOT / "raw" / uf.lower() / "manifest.json"
+    if not manifest.exists():
+        return (ROOT / "raw" / uf.lower()).exists()
+    started = dt.datetime.fromisoformat(json.loads(manifest.read_text())["started_at"])
+    return dt.datetime.now(dt.UTC) - started > dt.timedelta(hours=STALE_HOURS)
+
+
+def run_all(ufs: list[str], refresh: bool = False) -> None:
+    s3, name = bucket()
+    done = set(remote_catalog(s3, name)["states"])
+    todo = ufs or [uf for uf in STATES if refresh or uf not in done]
+    log(f"publicados: {len(done)}; fila: {todo}")
+    failed = {}
+    for uf in todo:
+        try:
+            if stale(uf):
+                clean(uf)
+            download(uf)
+            build(uf)
+            publish(uf)
+            clean(uf)
+        except (Exception, SystemExit) as err:  # um estado com problema não derruba a fila
+            failed[uf] = str(err)
+            log(f"{uf}: FALHOU — {err}")
+    log(f"fila concluída: {len(todo) - len(failed)} de {len(todo)} estados publicados")
+    if failed:
+        raise SystemExit(f"estados com falha: {failed}")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("step", choices=["download", "build", "publish", "clean", "all", "refresh", "verify", "summary"])
+    ap.add_argument("uf", nargs="*", help="siglas das UFs, ex.: PE")
+    a = ap.parse_args()
+    ufs = [u.upper() for u in a.uf]
+    if a.step == "refresh":
+        run_all(ufs, refresh=True)
+    elif a.step in ("all", "verify", "summary"):
+        {"all": run_all, "verify": verify, "summary": summary}[a.step](ufs)
+    else:
+        if not ufs:
+            ap.error("informe a UF")
+        for uf in ufs:
+            {"download": download, "build": build, "publish": publish, "clean": clean}[a.step](uf)

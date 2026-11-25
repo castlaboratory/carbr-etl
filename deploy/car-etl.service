@@ -1,0 +1,11 @@
+[Unit]
+Description=Atualização completa dos imóveis do CAR (Sicar -> GeoParquet -> bucket)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/carbr-etl
+ExecStart=%h/.local/bin/uv run etl/car_etl.py refresh
+Nice=10
+TimeoutStartSec=24h
