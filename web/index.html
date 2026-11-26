@@ -350,7 +350,9 @@ async function withQuality(rows) {
         if (q) Object.assign(p, { overlap_count: Number(q.overlap_count), overlap_share: q.overlap_share, outside_share: q.outside_share,
           indigenous_share: q.indigenous_share, strict_protection_share: q.strict_protection_share,
           sustainable_use_share: q.sustainable_use_share, indigenous_land: q.indigenous_land,
-          conservation_unit: q.conservation_unit, conservation_category: q.conservation_category });
+          conservation_unit: q.conservation_unit, conservation_category: q.conservation_category,
+          embargo_count: q.embargo_count === undefined || q.embargo_count === null ? undefined : Number(q.embargo_count),
+          embargo_share: q.embargo_share });
       });
     } catch (error) {
       console.warn("Indicadores de qualidade indisponíveis", error);
@@ -381,6 +383,14 @@ function conservationText(p) {
   if (!strict && !sustainable) return "Não";
   const group = strict ? "proteção integral" : "uso sustentável";
   return `${titleCase(p.conservation_unit)} (${group}): ${pct(strict ? p.strict_protection_share : p.sustainable_use_share)}`;
+}
+
+// Embargos ambientais ativos do Ibama sobre o imóvel.
+function embargoText(p) {
+  if (p.embargo_count === undefined) return p.status === "cancelled" ? "Não calculado (cancelado)" : "—";
+  if (p.embargo_count === 0) return "Nenhum";
+  const n = p.embargo_count === 1 ? "1 embargo ativo" : `${int.format(p.embargo_count)} embargos ativos`;
+  return p.embargo_share >= 0.01 ? `${n}, sobre ${pct(p.embargo_share)}` : n;
 }
 
 // ---- O que cada etapa quer dizer, em linguagem simples ----
@@ -547,6 +557,7 @@ function record(p) {
       <div><dt>Fora do município declarado</dt><dd>${outsideText(p)}</dd></div>
       <div><dt>Em terra indígena</dt><dd>${indigenousText(p)}</dd></div>
       <div><dt>Em unidade de conservação</dt><dd>${conservationText(p)}</dd></div>
+      <div><dt>Embargo do Ibama</dt><dd>${embargoText(p)}</dd></div>
     </dl>`;
   el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
   el.querySelector(".code").textContent = p.property_code;

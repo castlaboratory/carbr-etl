@@ -755,6 +755,72 @@ def protected() -> Path | None:
     return out
 
 
+IBAMA_EMBARGOES = ("https://stibamadadosabertosprd.blob.core.windows.net/dados-abertos/dados/TERMOS_DE_EMBARGO/"
+                   "TERMO_EMBARGO/termo_de_embargo.csv")
+
+
+def embargoes() -> Path | None:
+    """Embargos ambientais ativos do Ibama num Parquet local, refeito a cada 6 dias.
+
+    Fonte: dados abertos do Ibama, "Fiscalização - termo de embargo" (atualização diária). Ficam só os
+    termos não cancelados e sem desembargo, com o polígono da área embargada ou, na falta dele, o
+    ponto de referência. **O nome e o CPF/CNPJ do autuado, que a tabela traz, não são lidos**, e o
+    arquivo original é apagado depois da leitura. Se o download falhar, vale a cópia anterior; `None`
+    se não houver nenhuma.
+    """
+    import duckdb
+
+    folder = ROOT / "protected"
+    out = folder / "embargos.parquet"
+    if out.exists() and time.time() - out.stat().st_mtime < 6 * 86400:
+        return out
+    if os.environ.get("CAR_PROTECTED_OFFLINE") == "1":
+        return out if out.exists() else None
+    folder.mkdir(parents=True, exist_ok=True)
+    raw = folder / "embargos.csv"
+    try:
+        local = os.environ.get("CAR_EMBARGOES_CSV")      # um CSV já baixado, para não repetir o download
+        if local:
+            shutil.copyfile(local, raw)
+        elif not get(IBAMA_EMBARGOES, raw, 3600):
+            raise ValueError("download falhou")
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+        con.execute(f"""
+            CREATE TABLE e AS
+            SELECT SEQ_TAD::BIGINT AS id, NUM_TAD AS number, try_cast(DAT_EMBARGO AS TIMESTAMP)::DATE AS issued,
+                   UF AS state, TIPO_AREA AS kind, GEOM_AREA_EMBARGADA AS wkt,
+                   try_cast(replace(NUM_LONGITUDE_TAD, ',', '.') AS DOUBLE) AS lon,
+                   try_cast(replace(NUM_LATITUDE_TAD, ',', '.') AS DOUBLE) AS lat
+            FROM read_csv('{raw}', delim = ';', header = true, all_varchar = true, quote = '"', escape = '"',
+                          ignore_errors = true, max_line_size = 20000000)
+            WHERE coalesce(SIT_CANCELADO, 'N') <> 'S' AND coalesce(SIT_DESEMBARGO, 'N') <> 'S'
+        """)
+        con.execute(f"""
+            COPY (
+                WITH shaped AS (SELECT *, CASE WHEN length(wkt) > 10 THEN try(ST_MakeValid(ST_GeomFromText(wkt))) END AS poly FROM e)
+                SELECT id, number, issued, state, kind,
+                       CASE WHEN poly IS NOT NULL AND NOT ST_IsEmpty(poly) THEN poly
+                            WHEN lon BETWEEN -75 AND -28 AND lat BETWEEN -35 AND 6 THEN ST_Point(lon, lat) END AS g,
+                       (poly IS NOT NULL AND NOT ST_IsEmpty(poly)) AS has_area
+                FROM shaped
+                WHERE (poly IS NOT NULL AND NOT ST_IsEmpty(poly)) OR (lon BETWEEN -75 AND -28 AND lat BETWEEN -35 AND 6)
+            ) TO '{out}' (FORMAT parquet, COMPRESSION zstd)
+        """)
+        total, areas = con.execute(f"SELECT count(*), count(*) FILTER (has_area) FROM '{out}'").fetchone()
+        (folder / "embargos.json").write_text(json.dumps({
+            "source": "Ibama, dados abertos: Fiscalização - termo de embargo", "url": IBAMA_EMBARGOES,
+            "downloaded": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d"), "active": total, "with_area": areas,
+        }, indent=2, ensure_ascii=False))
+        log(f"embargos do Ibama: {total} ativos, {areas} com polígono")
+    except Exception as err:
+        log(f"embargos do Ibama indisponíveis ({err})")
+    finally:
+        raw.unlink(missing_ok=True)            # o original tem dado pessoal: não fica em disco
+        raw.with_name(raw.name + ".part").unlink(missing_ok=True)
+    return out if out.exists() else None
+
+
 def quality(uf: str) -> None:
     """Indicadores de qualidade por imóvel: sobreposição com vizinhos, área fora do município e
     sobreposição com terras indígenas e unidades de conservação.
@@ -838,6 +904,34 @@ def quality(uf: str) -> None:
         """)
     else:
         con.execute("""CREATE TABLE shares (rid BIGINT, kind VARCHAR, share DOUBLE, name VARCHAR, category VARCHAR)""")
+    # Embargos do Ibama: quantos termos ativos tocam o imóvel e que parcela da área está embargada.
+    # Um polígono só conta se cobre ao menos 1% do imóvel ou meio hectare; um ponto, se cai dentro.
+    embargo_file = embargoes()
+    if embargo_file:
+        if not areas:
+            con.execute("CREATE TABLE pu AS SELECT rid, g::GEOMETRY AS g FROM p")
+        con.execute(f"CREATE TABLE em AS SELECT id, has_area, g::GEOMETRY AS eg FROM '{embargo_file}' WHERE state = '{uf}'")
+        con.execute("CREATE TABLE ehit AS SELECT pu.rid, em.id FROM pu JOIN em ON ST_Intersects(pu.g, em.eg)")
+        con.execute("""
+            CREATE TABLE ecut AS
+            SELECT h.rid, h.id, em.has_area, p.area_ha, ST_Area(pu.g) AS area,
+                   CASE WHEN em.has_area THEN ST_Intersection(pu.g, em.eg) END AS ig
+            FROM ehit h JOIN pu ON pu.rid = h.rid JOIN em ON em.id = h.id JOIN p ON p.rid = h.rid
+        """)
+        con.execute("""
+            CREATE TABLE embargo AS
+            WITH kept AS (
+                SELECT * FROM ecut
+                WHERE NOT has_area OR ST_Area(ig) / nullif(area, 0) >= 0.01
+                      OR ST_Area(ig) / nullif(area, 0) * area_ha >= 0.5)
+            SELECT rid, count(DISTINCT id)::INTEGER AS embargo_count,
+                   coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (has_area)) / nullif(any_value(area), 0)), 0) AS embargo_share
+            FROM kept GROUP BY rid
+        """)
+    else:
+        con.execute("CREATE TABLE embargo (rid BIGINT, embargo_count INTEGER, embargo_share DOUBLE)")
+    em_count = "coalesce(eb.embargo_count, 0)::INTEGER" if embargo_file else "NULL::INTEGER"
+    em_share = "round(coalesce(eb.embargo_share, 0), 4)" if embargo_file else "NULL::DOUBLE"
     # Sem as camadas, as parcelas ficam nulas (não calculadas), não zero.
     share = (lambda k: f"round(coalesce({k}.share, 0), 4)") if areas else (lambda k: "NULL::DOUBLE")
     quality_file = out / "quality.parquet"
@@ -852,8 +946,11 @@ def quality(uf: str) -> None:
                    {share('us')} AS sustainable_use_share,
                    ti.name AS indigenous_land,
                    coalesce(pi.name, us.name) AS conservation_unit,
-                   coalesce(pi.category, us.category) AS conservation_category
+                   coalesce(pi.category, us.category) AS conservation_category,
+                   {em_count} AS embargo_count,
+                   {em_share} AS embargo_share
             FROM p LEFT JOIN overlap o USING (rid) {join}
+                 LEFT JOIN embargo eb ON eb.rid = p.rid
                  LEFT JOIN shares ti ON ti.rid = p.rid AND ti.kind = 'indigenous'
                  LEFT JOIN shares pi ON pi.rid = p.rid AND pi.kind = 'strict'
                  LEFT JOIN shares us ON us.rid = p.rid AND us.kind = 'sustainable'
@@ -874,15 +971,18 @@ def quality(uf: str) -> None:
                    count(*) FILTER (q.strict_protection_share > 0.01) AS strict_protection,
                    round(sum(p.area_ha * q.strict_protection_share), 2) AS strict_protection_ha,
                    count(*) FILTER (q.sustainable_use_share > 0.01) AS sustainable_use,
-                   round(sum(p.area_ha * q.sustainable_use_share), 2) AS sustainable_use_ha
+                   round(sum(p.area_ha * q.sustainable_use_share), 2) AS sustainable_use_ha,
+                   count(*) FILTER (q.embargo_count > 0) AS embargoed,
+                   round(sum(p.area_ha * q.embargo_share), 2) AS embargo_ha
             FROM '{quality_file}' q JOIN p USING (property_code)
             GROUP BY ALL ORDER BY q.municipality_code
         ) TO '{towns_file}' (FORMAT parquet, COMPRESSION zstd)
     """)
-    n, touching, half, out_half, in_ti, in_pi, in_us = con.execute(f"""
+    n, touching, half, out_half, in_ti, in_pi, in_us, embargoed = con.execute(f"""
         SELECT count(*), count(*) FILTER (overlap_share > 0.01), count(*) FILTER (overlap_share > 0.5),
                count(*) FILTER (outside_share > 0.5), count(*) FILTER (indigenous_share > 0.01),
-               count(*) FILTER (strict_protection_share > 0.01), count(*) FILTER (sustainable_use_share > 0.01)
+               count(*) FILTER (strict_protection_share > 0.01), count(*) FILTER (sustainable_use_share > 0.01),
+               count(*) FILTER (embargo_count > 0)
         FROM '{quality_file}'
     """).fetchone()
     files = {f"quality/state={uf}.parquet": quality_file,
@@ -898,11 +998,14 @@ def quality(uf: str) -> None:
     sources = ROOT / "protected" / "areas.json"
     if areas and sources.exists():
         cat["source"]["protected_areas"] = json.loads(sources.read_text())
+    embargo_source = ROOT / "protected" / "embargos.json"
+    if embargo_file and embargo_source.exists():
+        cat["source"]["embargoes"] = json.loads(embargo_source.read_text())
     s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
     log(f"{uf}: qualidade de {n} imóveis em {time.time() - t0:.0f}s; {touching} com sobreposição acima de 1%, "
         f"{half} acima de 50%, {out_half} com mais da metade fora do município; {in_ti} em terra indígena, "
-        f"{in_pi} em proteção integral, {in_us} em uso sustentável"
+        f"{in_pi} em proteção integral, {in_us} em uso sustentável, {embargoed} com embargo do Ibama"
         + ("" if boundaries else " (sem malha do IBGE)"))
 
 

@@ -61,7 +61,9 @@ Para cada imóvel não cancelado, `quality` calcula:
   `indigenous_land`;
 - `strict_protection_share` e `sustainable_use_share`: que parcela fica dentro de unidades de
   conservação de proteção integral e de uso sustentável, com o nome e a categoria da principal em
-  `conservation_unit` e `conservation_category` (a de proteção integral, se houver).
+  `conservation_unit` e `conservation_category` (a de proteção integral, se houver);
+- `embargo_count` e `embargo_share`: quantos embargos ambientais ativos do Ibama alcançam o imóvel e que
+  parcela da área está embargada.
 
 ```
 current/
@@ -80,6 +82,11 @@ o certificado intermediário da sua cadeia; para o Linux validar a conexão sem 
 ETL soma às raízes do sistema o intermediário guardado em `etl/certs/`. As duas camadas ficam em `data/protected/`
 por 30 dias, e a edição usada vai para `source.protected_areas` no catálogo. Estar em unidade de uso
 sustentável não é irregularidade: APA e RPPN admitem imóveis privados.
+
+Os embargos vêm dos dados abertos do Ibama ("Fiscalização - termo de embargo", atualização diária): só os
+termos não cancelados e sem desembargo, localizados pelo polígono da área ou, na falta dele, pelo ponto de
+referência. A tabela do Ibama traz o nome e o CPF ou CNPJ do autuado; **o ETL não lê essas colunas** e apaga o
+arquivo original depois de extrair o que usa. A camada é refeita a cada 6 dias (`data/protected/embargos.parquet`).
 
 As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
 imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma
