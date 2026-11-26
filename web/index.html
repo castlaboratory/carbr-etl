@@ -76,6 +76,18 @@
 
   #status { padding-block: .9rem; border-top: 1px solid var(--line); }
   #status[data-kind="error"] { color: var(--alert); font-weight: 600; }
+  /* Enquanto uma consulta roda: barra em movimento sob o texto, e o alfinete do mapa pulsa. */
+  #status { position: relative; }
+  body.working #status::after { content: ""; position: absolute; left: 0; bottom: 0; height: 3px; width: 34%;
+    background: var(--ink, #14301f); animation: working 1.1s ease-in-out infinite; }
+  @keyframes working { from { left: -34%; } to { left: 100%; } }
+  body.working .maplibregl-marker svg { animation: pulse .9s ease-in-out infinite alternate; transform-origin: 50% 100%; }
+  @keyframes pulse { from { opacity: 1; } to { opacity: .45; } }
+  body.working #map canvas { cursor: progress !important; }
+  @media (prefers-reduced-motion: reduce) {
+    body.working #status::after { animation: none; left: 0; width: 100%; opacity: .5; }
+    body.working .maplibregl-marker svg { animation: none; }
+  }
   #back { padding-bottom: .9rem; }
   #back[hidden] { display: none; }
 
@@ -275,6 +287,46 @@ async function read(path, options = {}) {
   return parquetReadObjects({ ...files.get(path), compressors, ...options });
 }
 
+// Os imóveis de um arquivo que contêm o ponto (x, y), lendo o mínimo:
+// 1. pelas estatísticas do rodapé, só os blocos dos municípios candidatos cujo retângulo cobre o ponto;
+// 2. nesses blocos, só as quatro colunas do retângulo de cada imóvel, que são pequenas;
+// 3. as demais colunas e a geometria, só nos blocos em que algum retângulo cobre o ponto.
+async function readAt(path, x, y, codes, columns, progress = () => {}) {
+  if (!files.has(path)) {
+    const file = remoteFile(path);
+    files.set(path, { file, metadata: await parquetMetadataAsync(file) });
+  }
+  const { file, metadata } = files.get(path);
+  progress("search");
+  const stats = (group, name) => group.columns.find((c) => c.meta_data.path_in_schema[0] === name)?.meta_data.statistics;
+  const number = (v) => (v === undefined || v === null ? NaN : Number(v));
+  // Sem estatística, o bloco fica: `!(a > b)` é verdadeiro quando falta um dos lados.
+  const covers = (group) => {
+    const [x0, x1, y0, y1, town] = ["xmin", "xmax", "ymin", "ymax", "municipality_code"].map((n) => stats(group, n));
+    if (number(x0?.min_value) > x || number(x1?.max_value) < x || number(y0?.min_value) > y || number(y1?.max_value) < y) return false;
+    const low = number(town?.min_value), high = number(town?.max_value);
+    return Number.isNaN(low) || Number.isNaN(high) || codes.some((c) => c >= low && c <= high);
+  };
+  let start = 0;
+  const groups = [];
+  for (const group of metadata.row_groups) {
+    const rows = Number(group.num_rows);
+    if (covers(group)) groups.push({ start, end: start + rows });
+    start += rows;
+  }
+  const parts = await Promise.all(groups.map(async ({ start, end }) => {
+    const boxes = await parquetReadObjects({ file, metadata, compressors, columns: ["xmin", "xmax", "ymin", "ymax"], rowStart: start, rowEnd: end });
+    const hits = [];
+    boxes.forEach((b, i) => { if (b.xmin <= x && b.xmax >= x && b.ymin <= y && b.ymax >= y) hits.push(start + i); });
+    if (hits.length === 0) return [];
+    progress("found");
+    const rows = await parquetReadObjects({ file, metadata, compressors, columns: [...columns, "xmin", "xmax", "ymin", "ymax"],
+      rowStart: hits[0], rowEnd: hits[hits.length - 1] + 1 });
+    return rows.filter((b) => b.xmin <= x && b.xmax >= x && b.ymin <= y && b.ymax >= y);
+  }));
+  return parts.flat();
+}
+
 const propertiesPath = (uf) => `properties/state=${uf}/part-0.parquet`;
 const FIELDS = ["property_code", "status", "condition", "property_type", "created_at", "area_ha",
   "fiscal_modules", "size_class", "state", "municipality", "municipality_code"];
@@ -447,7 +499,11 @@ function say(text, kind = "") {
   $("status").textContent = text; $("status").dataset.kind = kind;
   document.body.classList.toggle("answered", drawn.length > 0);
 }
-function busy(on) { document.querySelectorAll("form button").forEach((b) => (b.disabled = on)); }
+function busy(on) {
+  document.querySelectorAll("form button").forEach((b) => (b.disabled = on));
+  document.body.classList.toggle("working", on);
+  $("status").setAttribute("aria-busy", String(on));
+}
 
 performance.setResourceTimingBufferSize?.(4000);
 function showMeter(seconds, states) {
@@ -509,12 +565,17 @@ let scope = null;
 let chosen = [];
 let focused = null;
 
+// Leva ao mapa os imóveis de `drawn` (sem mexer na seleção).
+function paint() {
+  map.getSource("found").setData({ type: "FeatureCollection", features: drawn.map(({ geometry, box, created_at, ...properties }) =>
+    ({ type: "Feature", geometry, properties })) });
+}
+
 function draw(rows) {
   drawn = rows.filter((p) => p.geometry).map((p) => ({ ...p, stage: stageOf(p.condition), box: boxOf(p.geometry) }));
   map.removeFeatureState({ source: "found" });
   chosen = []; focused = null;
-  map.getSource("found").setData({ type: "FeatureCollection", features: drawn.map(({ geometry, box, created_at, ...properties }) =>
-    ({ type: "Feature", geometry, properties })) });
+  paint();
   $("results").replaceChildren();
   $("back").hidden = true;
   return drawn;
@@ -546,6 +607,14 @@ function choose(rows) {
   if (rows.length) { focusOn(rows[0].property_code); fit(boundsOf(rows)); }
 }
 
+// Reescreve as fichas dos imóveis escolhidos, sem mexer no mapa nem no enquadramento.
+function refresh(rows) {
+  const list = $("results");
+  list.querySelectorAll(".record").forEach((node) => node.remove());
+  rows.forEach((p) => list.append(record(p)));
+  if (focused) focusOn(focused);
+}
+
 $("clear").addEventListener("click", () => {
   pin?.remove();
   if (scope) {
@@ -568,8 +637,10 @@ async function consult(states, run) {
   performance.clearResourceTimings();
   const started = performance.now();
   try {
-    await run();
-    showMeter((performance.now() - started) / 1000, states);
+    // `run` pode devolver o instante em que a resposta apareceu na tela, quando ainda
+    // completa a ficha depois disso; o medidor conta o tempo até a resposta.
+    const shown = await run();
+    showMeter(((shown ?? performance.now()) - started) / 1000, states);
   } catch (error) {
     console.error(error);
     say("Não foi possível ler os dados agora. Confira a conexão e tente de novo.", "error");
@@ -647,22 +718,41 @@ map.on("click", (event) => {
     }
   }
 
-  const states = [...new Set(towns.filter((t) => t.xmin <= x && t.xmax >= x && t.ymin <= y && t.ymax >= y).map((t) => t.state))];
+  // Um imóvel que cobre o ponto pertence a um município cujo retângulo também cobre.
+  const near = towns.filter((t) => t.xmin <= x && t.xmax >= x && t.ymin <= y && t.ymax >= y);
+  const states = [...new Set(near.map((t) => t.state))];
   if (states.length === 0) {
     if (!scope) draw([]);
     $("meter").hidden = true;
     say(towns.length ? "Nenhum imóvel declarado neste ponto." : "O catálogo ainda está carregando; tente em alguns segundos.");
     return;
   }
-  say("Consultando os imóveis declarados neste ponto…");
+  const where = states.length === 1 ? states[0] : `${states.slice(0, -1).join(", ")} e ${states.at(-1)}`;
+  say(`Lendo o índice dos imóveis de ${where}…`);
   consult(states, async () => {
-    const filter = { xmin: { $lte: x }, xmax: { $gte: x }, ymin: { $lte: y }, ymax: { $gte: y } };
-    const parts = await Promise.all(states.map((uf) => read(propertiesPath(uf), { columns: [...FIELDS, "geometry"], filter })));
-    const rows = await withQuality(parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y)));
+    // As etapas só avançam: com mais de um estado, vale a mais adiantada.
+    let stage = 0;
+    const progress = (name) => {
+      const order = { search: 1, found: 2 };
+      if (order[name] <= stage) return;
+      stage = order[name];
+      say(name === "search" ? "Procurando os imóveis que cobrem este ponto…" : "Imóvel encontrado. Buscando o perímetro…");
+    };
+    const parts = await Promise.all(states.map((uf) => readAt(propertiesPath(uf), x, y,
+      near.filter((t) => t.state === uf).map((t) => t.municipality_code), [...FIELDS, "geometry"], progress)));
+    const rows = parts.flat().filter((p) => p.geometry && contains(p.geometry, x, y));
     if (rows.length === 0 && scope) { say("Nenhum imóvel declarado neste ponto."); return; }
     scope = null; outline(null);
+    // O polígono e a ficha aparecem já; os indicadores de qualidade completam a ficha em seguida.
     choose(at(draw(rows), x, y));
-    say(rows.length ? found(rows.length) : "Nenhum imóvel declarado neste ponto.");
+    const shown = performance.now();
+    if (rows.length === 0) { say("Nenhum imóvel declarado neste ponto."); return shown; }
+    say(`${found(rows.length)} Completando a ficha…`);
+    const before = chosen.join();
+    await withQuality(drawn);
+    if (chosen.join() === before) { paint(); refresh(at(drawn, x, y)); }
+    say(found(rows.length));
+    return shown;
   });
 });
 
