@@ -93,6 +93,13 @@ As florestas públicas não destinadas vêm do Cadastro Nacional de Florestas P�
 Brasileiro, pelo portal de mapas do SFB (um shapefile de 230 MB; ficam as 1.730 glebas do "tipo B"). O endereço
 no ETL é o da edição vigente e precisa ser trocado a cada edição nova (`CNFP` e `CNFP_EDITION`).
 
+**O que não entra, e por quê.** Dos oito impedimentos que o Manual de Crédito Rural lista (capítulo 2, seção
+9), cinco estão cobertos: situação do CAR, terras indígenas, unidades de conservação, embargos e florestas
+públicas não destinadas. Ficam de fora os territórios quilombolas, porque o Incra desativou em 2026 os
+endereços em que publicava a camada (`acervofundiario.incra.gov.br` e `certificacao.incra.gov.br`) e o
+GeoPortal novo ainda não a traz; a supressão de vegetação, que depende de autorizações sem cadastro público
+único; e o trabalho análogo à escravidão, que é uma lista de pessoas. Nenhuma camada vem de cópia de terceiros.
+
 As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
 imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma
 falha nele fica no log e não impede a atualização dos dados.

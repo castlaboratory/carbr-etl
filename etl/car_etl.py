@@ -775,6 +775,82 @@ def protected() -> Path | None:
     return out
 
 
+# Parcelas do Sigef (Incra): GeoPortal oficial, que substituiu o Acervo Fundiário em 2026.
+SIGEF_WFS = "https://geoportal.incra.gov.br/geoserver/wfs"
+# Só estes campos são pedidos ao servidor. A camada traz também o responsável técnico, o nome da área e a
+# matrícula, que não são lidos.
+SIGEF_FIELDS = "parcela_codigo,status,natureza,area_hectares,data_aprovacao,geometry"
+IBGE_UF = {"RO": 11, "AC": 12, "AM": 13, "RR": 14, "PA": 15, "AP": 16, "TO": 17, "MA": 21, "PI": 22, "CE": 23,
+           "RN": 24, "PB": 25, "PE": 26, "AL": 27, "SE": 28, "BA": 29, "MG": 31, "ES": 32, "RJ": 33, "SP": 35,
+           "PR": 41, "SC": 42, "RS": 43, "MS": 50, "MT": 51, "GO": 52, "DF": 53}
+
+
+def sigef(uf: str) -> Path | None:
+    """Parcelas georreferenciadas do Sigef no estado, num Parquet local refeito a cada 30 dias.
+
+    Uma linha por parcela: `id`, `status` (CERTIFICADA, REGISTRADA, TITULACAO…), `kind` (a natureza:
+    Particular, Assentamento, Gleba Pública, Território Quilombola…), `area_ha`, `approved` e a
+    geometria. Páginas de 5 mil, sequenciais, por chave (`parcela_codigo > '<último>'`), com pausa.
+    Se o download falhar no meio, nada é trocado e vale a cópia anterior; `None` se não houver.
+    """
+    import duckdb
+
+    folder = ROOT / "protected" / "sigef"
+    out = folder / f"{uf}.parquet"
+    if out.exists() and time.time() - out.stat().st_mtime < 30 * 86400:
+        return out
+    if os.environ.get("CAR_PROTECTED_OFFLINE") == "1":
+        return out if out.exists() else None
+    pages = folder / f"{uf}.pages"
+    shutil.rmtree(pages, ignore_errors=True)
+    pages.mkdir(parents=True, exist_ok=True)
+    last, n, total = "", 0, 0
+    try:
+        while True:
+            page = pages / f"{n:05d}.geojson"
+            where = f"uf_id={IBGE_UF[uf]}" + (f" AND parcela_codigo > '{last}'" if last else "")
+            rc = subprocess.run([
+                "curl", "-sS", "--fail", "--compressed", "-m", "900", "-A", BROWSER_AGENT, "-G", SIGEF_WFS,
+                "--data", "service=WFS&version=2.0.0&request=GetFeature&typeNames=geonode:sigef_geo"
+                          f"&outputFormat=application/json&propertyName={SIGEF_FIELDS}&sortBy=parcela_codigo&count={PAGE}",
+                "--data-urlencode", f"CQL_FILTER={where}", "-o", str(page)]).returncode
+            if rc != 0:
+                raise ValueError(f"página {n} falhou (curl {rc})")
+            features = json.loads(page.read_text())["features"]
+            if not features:
+                page.unlink()
+                break
+            last = features[-1]["properties"]["parcela_codigo"]
+            total += len(features)
+            n += 1
+            if len(features) < PAGE:
+                break
+            time.sleep(PAUSE_S)
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
+        tmp = out.with_suffix(".part")
+        if n == 0:
+            con.execute(f"""COPY (SELECT NULL::VARCHAR AS id, NULL::VARCHAR AS status, NULL::VARCHAR AS kind, NULL::DOUBLE AS area_ha,
+                                          NULL::DATE AS approved, NULL::GEOMETRY AS g WHERE false) TO '{tmp}' (FORMAT parquet)""")
+        else:
+            files = ", ".join(f"ST_Read('{f}')" for f in sorted(pages.glob("*.geojson")))
+            union = " UNION ALL ".join(f"SELECT parcela_codigo, status, natureza, area_hectares, data_aprovacao, geom FROM {f}"
+                                       for f in files.split(", "))
+            con.execute(f"""
+                COPY (SELECT parcela_codigo AS id, status, natureza AS kind, area_hectares AS area_ha,
+                             try_cast(data_aprovacao AS TIMESTAMP)::DATE AS approved, ST_MakeValid(geom)::GEOMETRY AS g
+                      FROM ({union}) WHERE geom IS NOT NULL)
+                TO '{tmp}' (FORMAT parquet, COMPRESSION zstd)
+            """)
+        tmp.rename(out)
+        log(f"{uf}: Sigef com {total} parcelas em {n} páginas")
+    except Exception as err:
+        log(f"{uf}: Sigef indisponível ({err})")
+    finally:
+        shutil.rmtree(pages, ignore_errors=True)
+    return out if out.exists() else None
+
+
 IBAMA_EMBARGOES = ("https://stibamadadosabertosprd.blob.core.windows.net/dados-abertos/dados/TERMOS_DE_EMBARGO/"
                    "TERMO_EMBARGO/termo_de_embargo.csv")
 
