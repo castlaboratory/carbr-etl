@@ -66,7 +66,8 @@ Para cada imóvel não cancelado, `quality` calcula:
   parcela da área está embargada;
 - `public_forest_share`: que parcela fica dentro de florestas públicas não destinadas ("tipo B");
 - `sigef_count` e `sigef_share`: quantas parcelas georreferenciadas no Sigef (Incra) o imóvel alcança e que
-  parcela da área elas cobrem; `quilombola_share` e `settlement_share`: quanto cai em parcelas cuja natureza é
+  parcela da área elas cobrem, contando só parcelas particulares e lotes de assentamento (as glebas públicas
+  do Sigef cobririam tudo o que está dentro delas); `quilombola_share` e `settlement_share`: quanto cai em parcelas cuja natureza é
   território quilombola ou assentamento.
 
 ```

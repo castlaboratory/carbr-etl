@@ -1036,8 +1036,9 @@ def quality(uf: str) -> None:
         con.execute("CREATE TABLE embargo (rid BIGINT, embargo_count INTEGER, embargo_share DOUBLE)")
     em_count = "coalesce(eb.embargo_count, 0)::INTEGER" if embargo_file else "NULL::INTEGER"
     em_share = "round(coalesce(eb.embargo_share, 0), 4)" if embargo_file else "NULL::DOUBLE"
-    # Sigef (Incra): que parcela do imóvel está coberta por parcelas georreferenciadas, quantas são, e
-    # quanto cai em parcela cuja natureza é território quilombola ou assentamento.
+    # Sigef (Incra): que parcela do imóvel está coberta por parcelas georreferenciadas de imóveis (particulares
+    # e lotes de assentamento), quantas são, e quanto cai em parcela cuja natureza é território quilombola ou
+    # assentamento.
     sigef_file = sigef(uf)
     if sigef_file:
         con.execute("CREATE TABLE IF NOT EXISTS pu AS SELECT rid, g::GEOMETRY AS g FROM p")
@@ -1053,8 +1054,11 @@ def quality(uf: str) -> None:
             WITH kept AS (
                 SELECT * FROM scut
                 WHERE ST_Area(ig) / nullif(area, 0) >= 0.01 OR ST_Area(ig) / nullif(area, 0) * area_ha >= 0.5)
-            SELECT rid, count(DISTINCT id)::INTEGER AS sigef_count,
-                   least(1.0, ST_Area(ST_Union_Agg(ig)) / nullif(any_value(area), 0)) AS sigef_share,
+            -- A cobertura conta só parcelas particulares e lotes de assentamento: glebas públicas, unidades de
+            -- conservação e terras indígenas também estão no Sigef e cobririam tudo o que está dentro delas.
+            SELECT rid, (count(DISTINCT id) FILTER (kind IN ('Particular', 'Assentamento Parcela')))::INTEGER AS sigef_count,
+                   coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (kind IN ('Particular', 'Assentamento Parcela')))
+                                       / nullif(any_value(area), 0)), 0) AS sigef_share,
                    coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (kind = 'Território Quilombola'))
                                        / nullif(any_value(area), 0)), 0) AS quilombola_share,
                    coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (kind LIKE 'Assentamento%'))
