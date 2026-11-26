@@ -809,14 +809,23 @@ def sigef(uf: str) -> Path | None:
         while True:
             page = pages / f"{n:05d}.geojson"
             where = f"uf_id={IBGE_UF[uf]}" + (f" AND parcela_codigo > '{last}'" if last else "")
-            rc = subprocess.run([
-                "curl", "-sS", "--fail", "--compressed", "-m", "900", "-A", BROWSER_AGENT, "-G", SIGEF_WFS,
-                "--data", "service=WFS&version=2.0.0&request=GetFeature&typeNames=geonode:sigef_geo"
-                          f"&outputFormat=application/json&propertyName={SIGEF_FIELDS}&sortBy=parcela_codigo&count={PAGE}",
-                "--data-urlencode", f"CQL_FILTER={where}", "-o", str(page)]).returncode
-            if rc != 0:
+            features = None
+            for attempt in range(6):         # o servidor do Incra às vezes derruba a conexão: insistir
+                rc = subprocess.run([
+                    "curl", "-sS", "--fail", "--compressed", "-m", "900", "-A", BROWSER_AGENT, "-G", SIGEF_WFS,
+                    "--data", "service=WFS&version=2.0.0&request=GetFeature&typeNames=geonode:sigef_geo"
+                              f"&outputFormat=application/json&propertyName={SIGEF_FIELDS}&sortBy=parcela_codigo&count={PAGE}",
+                    "--data-urlencode", f"CQL_FILTER={where}", "-o", str(page)],
+                    stderr=subprocess.DEVNULL if attempt < 5 else None).returncode
+                try:
+                    features = json.loads(page.read_text())["features"] if rc == 0 else None
+                except (ValueError, KeyError, OSError):
+                    features = None
+                if features is not None:
+                    break
+                time.sleep(15 * (attempt + 1))
+            if features is None:
                 raise ValueError(f"página {n} falhou (curl {rc})")
-            features = json.loads(page.read_text())["features"]
             if not features:
                 page.unlink()
                 break
