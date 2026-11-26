@@ -352,7 +352,9 @@ async function withQuality(rows) {
           sustainable_use_share: q.sustainable_use_share, indigenous_land: q.indigenous_land,
           conservation_unit: q.conservation_unit, conservation_category: q.conservation_category,
           embargo_count: q.embargo_count === undefined || q.embargo_count === null ? undefined : Number(q.embargo_count),
-          embargo_share: q.embargo_share, public_forest_share: q.public_forest_share });
+          embargo_share: q.embargo_share, public_forest_share: q.public_forest_share,
+          sigef_count: q.sigef_count === undefined || q.sigef_count === null ? undefined : Number(q.sigef_count),
+          sigef_share: q.sigef_share, quilombola_share: q.quilombola_share, settlement_share: q.settlement_share });
       });
     } catch (error) {
       console.warn("Indicadores de qualidade indisponíveis", error);
@@ -389,6 +391,16 @@ function conservationText(p) {
 function forestText(p) {
   if (p.public_forest_share === undefined || p.public_forest_share === null) return p.status === "cancelled" ? "Não calculada (cancelado)" : "—";
   return p.public_forest_share >= 0.01 ? pct(p.public_forest_share) : "Não";
+}
+
+// Sigef (Incra): quanto do imóvel coincide com parcelas georreferenciadas, e o que elas são.
+function sigefText(p) {
+  if (p.sigef_share === undefined || p.sigef_share === null) return p.status === "cancelled" ? "Não calculado (cancelado)" : "—";
+  if (!(p.sigef_share >= 0.01)) return "Não";
+  const parts = [`${pct(p.sigef_share)}, em ${int.format(p.sigef_count)} ${p.sigef_count === 1 ? "parcela" : "parcelas"}`];
+  if (p.quilombola_share >= 0.01) parts.push(`território quilombola em ${pct(p.quilombola_share)}`);
+  if (p.settlement_share >= 0.01) parts.push(`assentamento em ${pct(p.settlement_share)}`);
+  return parts.join("; ");
 }
 
 // Embargos ambientais ativos do Ibama sobre o imóvel.
@@ -565,6 +577,7 @@ function record(p) {
       <div><dt>Em unidade de conservação</dt><dd>${conservationText(p)}</dd></div>
       <div><dt>Embargo do Ibama</dt><dd>${embargoText(p)}</dd></div>
       <div><dt>Em floresta pública não destinada</dt><dd>${forestText(p)}</dd></div>
+      <div><dt>Georreferenciado no Incra (Sigef)</dt><dd>${sigefText(p)}</dd></div>
     </dl>`;
   el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
   el.querySelector(".code").textContent = p.property_code;

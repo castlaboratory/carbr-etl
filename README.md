@@ -64,7 +64,10 @@ Para cada imóvel não cancelado, `quality` calcula:
   `conservation_unit` e `conservation_category` (a de proteção integral, se houver);
 - `embargo_count` e `embargo_share`: quantos embargos ambientais ativos do Ibama alcançam o imóvel e que
   parcela da área está embargada;
-- `public_forest_share`: que parcela fica dentro de florestas públicas não destinadas ("tipo B").
+- `public_forest_share`: que parcela fica dentro de florestas públicas não destinadas ("tipo B");
+- `sigef_count` e `sigef_share`: quantas parcelas georreferenciadas no Sigef (Incra) o imóvel alcança e que
+  parcela da área elas cobrem; `quilombola_share` e `settlement_share`: quanto cai em parcelas cuja natureza é
+  território quilombola ou assentamento.
 
 ```
 current/
@@ -93,12 +96,19 @@ As florestas públicas não destinadas vêm do Cadastro Nacional de Florestas P�
 Brasileiro, pelo portal de mapas do SFB (um shapefile de 230 MB; ficam as 1.730 glebas do "tipo B"). O endereço
 no ETL é o da edição vigente e precisa ser trocado a cada edição nova (`CNFP` e `CNFP_EDITION`).
 
+As parcelas do Sigef vêm do GeoPortal do Incra (`geoportal.incra.gov.br`, camada `sigef_geo`, 2,4 milhões de
+parcelas), que substituiu o Acervo Fundiário em 2026. O download é por estado, em páginas de 5 mil, por chave,
+e pede ao servidor só o código da parcela, a situação, a natureza, a área, a data de aprovação e a geometria;
+a camada traz também o responsável técnico, o nome da área e a matrícula, que **não são lidos**. Cada estado
+fica em `data/protected/sigef/<UF>.parquet` por 30 dias.
+
 **O que não entra, e por quê.** Dos oito impedimentos que o Manual de Crédito Rural lista (capítulo 2, seção
 9), cinco estão cobertos: situação do CAR, terras indígenas, unidades de conservação, embargos e florestas
-públicas não destinadas. Ficam de fora os territórios quilombolas, porque o Incra desativou em 2026 os
-endereços em que publicava a camada (`acervofundiario.incra.gov.br` e `certificacao.incra.gov.br`) e o
-GeoPortal novo ainda não a traz; a supressão de vegetação, que depende de autorizações sem cadastro público
-único; e o trabalho análogo à escravidão, que é uma lista de pessoas. Nenhuma camada vem de cópia de terceiros.
+públicas não destinadas. Os territórios quilombolas entram **em parte**: o Incra desativou em 2026 os endereços
+em que publicava a camada completa (`acervofundiario.incra.gov.br` e `certificacao.incra.gov.br`) e o GeoPortal
+novo ainda não a traz; usamos os territórios já georreferenciados no Sigef, que são uma fração. Ficam de fora a
+supressão de vegetação, que depende de autorizações sem cadastro público único, e o trabalho análogo à
+escravidão, que é uma lista de pessoas. Nenhuma camada vem de cópia de terceiros.
 
 As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
 imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma

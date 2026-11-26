@@ -988,7 +988,7 @@ def quality(uf: str) -> None:
         # As duas tabelas sem o sistema de referência no tipo (um vem como CRS84, o outro como
         # EPSG:4674; as coordenadas são as mesmas), senão a junção espacial recusa o par.
         con.execute(f"CREATE TABLE a AS SELECT aid, kind, name, category, g::GEOMETRY AS ag FROM '{areas}'")
-        con.execute("CREATE TABLE pu AS SELECT rid, g::GEOMETRY AS g FROM p")
+        con.execute("CREATE TABLE IF NOT EXISTS pu AS SELECT rid, g::GEOMETRY AS g FROM p")
         con.execute("CREATE TABLE hit AS SELECT pu.rid, a.aid FROM pu JOIN a ON ST_Intersects(pu.g, a.ag)")
         con.execute("""
             CREATE TABLE cut AS
@@ -1013,8 +1013,7 @@ def quality(uf: str) -> None:
     # Um polígono só conta se cobre ao menos 1% do imóvel ou meio hectare; um ponto, se cai dentro.
     embargo_file = embargoes()
     if embargo_file:
-        if not areas:
-            con.execute("CREATE TABLE pu AS SELECT rid, g::GEOMETRY AS g FROM p")
+        con.execute("CREATE TABLE IF NOT EXISTS pu AS SELECT rid, g::GEOMETRY AS g FROM p")
         con.execute(f"CREATE TABLE em AS SELECT id, has_area, g::GEOMETRY AS eg FROM '{embargo_file}' WHERE state = '{uf}'")
         con.execute("CREATE TABLE ehit AS SELECT pu.rid, em.id FROM pu JOIN em ON ST_Intersects(pu.g, em.eg)")
         con.execute("""
@@ -1037,6 +1036,36 @@ def quality(uf: str) -> None:
         con.execute("CREATE TABLE embargo (rid BIGINT, embargo_count INTEGER, embargo_share DOUBLE)")
     em_count = "coalesce(eb.embargo_count, 0)::INTEGER" if embargo_file else "NULL::INTEGER"
     em_share = "round(coalesce(eb.embargo_share, 0), 4)" if embargo_file else "NULL::DOUBLE"
+    # Sigef (Incra): que parcela do imóvel está coberta por parcelas georreferenciadas, quantas são, e
+    # quanto cai em parcela cuja natureza é território quilombola ou assentamento.
+    sigef_file = sigef(uf)
+    if sigef_file:
+        con.execute("CREATE TABLE IF NOT EXISTS pu AS SELECT rid, g::GEOMETRY AS g FROM p")
+        con.execute(f"CREATE TABLE sg AS SELECT id, kind, g::GEOMETRY AS sgg FROM '{sigef_file}' WHERE g IS NOT NULL")
+        con.execute("CREATE TABLE shit AS SELECT pu.rid, sg.id FROM pu JOIN sg ON ST_Intersects(pu.g, sg.sgg)")
+        con.execute("""
+            CREATE TABLE scut AS
+            SELECT h.rid, h.id, sg.kind, p.area_ha, ST_Area(pu.g) AS area, ST_Intersection(pu.g, sg.sgg) AS ig
+            FROM shit h JOIN pu ON pu.rid = h.rid JOIN sg ON sg.id = h.id JOIN p ON p.rid = h.rid
+        """)
+        con.execute("""
+            CREATE TABLE certified AS
+            WITH kept AS (
+                SELECT * FROM scut
+                WHERE ST_Area(ig) / nullif(area, 0) >= 0.01 OR ST_Area(ig) / nullif(area, 0) * area_ha >= 0.5)
+            SELECT rid, count(DISTINCT id)::INTEGER AS sigef_count,
+                   least(1.0, ST_Area(ST_Union_Agg(ig)) / nullif(any_value(area), 0)) AS sigef_share,
+                   coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (kind = 'Território Quilombola'))
+                                       / nullif(any_value(area), 0)), 0) AS quilombola_share,
+                   coalesce(least(1.0, ST_Area(ST_Union_Agg(ig) FILTER (kind LIKE 'Assentamento%'))
+                                       / nullif(any_value(area), 0)), 0) AS settlement_share
+            FROM kept GROUP BY rid
+        """)
+    else:
+        con.execute("""CREATE TABLE certified (rid BIGINT, sigef_count INTEGER, sigef_share DOUBLE,
+                                               quilombola_share DOUBLE, settlement_share DOUBLE)""")
+    sg_count = "coalesce(ct.sigef_count, 0)::INTEGER" if sigef_file else "NULL::INTEGER"
+    sg_col = (lambda c: f"round(coalesce(ct.{c}, 0), 4)") if sigef_file else (lambda c: "NULL::DOUBLE")
     # Sem as camadas, as parcelas ficam nulas (não calculadas), não zero.
     share = (lambda k: f"round(coalesce({k}.share, 0), 4)") if areas else (lambda k: "NULL::DOUBLE")
     quality_file = out / "quality.parquet"
@@ -1054,9 +1083,14 @@ def quality(uf: str) -> None:
                    coalesce(pi.name, us.name) AS conservation_unit,
                    coalesce(pi.category, us.category) AS conservation_category,
                    {em_count} AS embargo_count,
-                   {em_share} AS embargo_share
+                   {em_share} AS embargo_share,
+                   {sg_count} AS sigef_count,
+                   {sg_col('sigef_share')} AS sigef_share,
+                   {sg_col('quilombola_share')} AS quilombola_share,
+                   {sg_col('settlement_share')} AS settlement_share
             FROM p LEFT JOIN overlap o USING (rid) {join}
                  LEFT JOIN embargo eb ON eb.rid = p.rid
+                 LEFT JOIN certified ct ON ct.rid = p.rid
                  LEFT JOIN shares ti ON ti.rid = p.rid AND ti.kind = 'indigenous'
                  LEFT JOIN shares pi ON pi.rid = p.rid AND pi.kind = 'strict'
                  LEFT JOIN shares us ON us.rid = p.rid AND us.kind = 'sustainable'
@@ -1082,16 +1116,21 @@ def quality(uf: str) -> None:
                    count(*) FILTER (q.public_forest_share > 0.01) AS public_forest,
                    round(sum(p.area_ha * q.public_forest_share), 2) AS public_forest_ha,
                    count(*) FILTER (q.embargo_count > 0) AS embargoed,
-                   round(sum(p.area_ha * q.embargo_share), 2) AS embargo_ha
+                   round(sum(p.area_ha * q.embargo_share), 2) AS embargo_ha,
+                   count(*) FILTER (q.sigef_share >= 0.5) AS certified,
+                   round(sum(p.area_ha * q.sigef_share), 2) AS sigef_ha,
+                   count(*) FILTER (q.quilombola_share > 0.01) AS quilombola,
+                   count(*) FILTER (q.settlement_share > 0.01) AS settlement
             FROM '{quality_file}' q JOIN p USING (property_code)
             GROUP BY ALL ORDER BY q.municipality_code
         ) TO '{towns_file}' (FORMAT parquet, COMPRESSION zstd)
     """)
-    n, touching, half, out_half, in_ti, in_pi, in_us, embargoed, in_fb = con.execute(f"""
+    n, touching, half, out_half, in_ti, in_pi, in_us, embargoed, in_fb, in_sg, in_qu = con.execute(f"""
         SELECT count(*), count(*) FILTER (overlap_share > 0.01), count(*) FILTER (overlap_share > 0.5),
                count(*) FILTER (outside_share > 0.5), count(*) FILTER (indigenous_share > 0.01),
                count(*) FILTER (strict_protection_share > 0.01), count(*) FILTER (sustainable_use_share > 0.01),
-               count(*) FILTER (embargo_count > 0), count(*) FILTER (public_forest_share > 0.01)
+               count(*) FILTER (embargo_count > 0), count(*) FILTER (public_forest_share > 0.01),
+               count(*) FILTER (sigef_share >= 0.5), count(*) FILTER (quilombola_share > 0.01)
         FROM '{quality_file}'
     """).fetchone()
     files = {f"quality/state={uf}.parquet": quality_file,
@@ -1110,11 +1149,15 @@ def quality(uf: str) -> None:
     embargo_source = ROOT / "protected" / "embargos.json"
     if embargo_file and embargo_source.exists():
         cat["source"]["embargoes"] = json.loads(embargo_source.read_text())
+    if sigef_file:
+        cat["source"]["sigef"] = {"source": "Incra, Sigef (GeoPortal, camada sigef_geo)", "url": SIGEF_WFS,
+                                  "downloaded": dt.datetime.fromtimestamp(sigef_file.stat().st_mtime, dt.UTC).strftime("%Y-%m-%d")}
     s3.put_object(Bucket=name, Key="current/catalog.json", ContentType="application/json",
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
     log(f"{uf}: qualidade de {n} imóveis em {time.time() - t0:.0f}s; {touching} com sobreposição acima de 1%, "
         f"{half} acima de 50%, {out_half} com mais da metade fora do município; {in_ti} em terra indígena, "
-        f"{in_pi} em proteção integral, {in_us} em uso sustentável, {embargoed} com embargo do Ibama, {in_fb} em floresta pública tipo B"
+        f"{in_pi} em proteção integral, {in_us} em uso sustentável, {embargoed} com embargo do Ibama, {in_fb} em floresta pública tipo B, {in_sg} com mais da metade no Sigef, "
+        f"{in_qu} em território quilombola do Sigef"
         + ("" if boundaries else " (sem malha do IBGE)"))
 
 
