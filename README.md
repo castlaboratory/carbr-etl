@@ -63,7 +63,8 @@ Para cada imóvel não cancelado, `quality` calcula:
   conservação de proteção integral e de uso sustentável, com o nome e a categoria da principal em
   `conservation_unit` e `conservation_category` (a de proteção integral, se houver);
 - `embargo_count` e `embargo_share`: quantos embargos ambientais ativos do Ibama alcançam o imóvel e que
-  parcela da área está embargada.
+  parcela da área está embargada;
+- `public_forest_share`: que parcela fica dentro de florestas públicas não destinadas ("tipo B").
 
 ```
 current/
@@ -87,6 +88,10 @@ Os embargos vêm dos dados abertos do Ibama ("Fiscalização - termo de embargo"
 termos não cancelados e sem desembargo, localizados pelo polígono da área ou, na falta dele, pelo ponto de
 referência. A tabela do Ibama traz o nome e o CPF ou CNPJ do autuado; **o ETL não lê essas colunas** e apaga o
 arquivo original depois de extrair o que usa. A camada é refeita a cada 6 dias (`data/protected/embargos.parquet`).
+
+As florestas públicas não destinadas vêm do Cadastro Nacional de Florestas Públicas (CNFP), do Serviço Florestal
+Brasileiro, pelo portal de mapas do SFB (um shapefile de 230 MB; ficam as 1.730 glebas do "tipo B"). O endereço
+no ETL é o da edição vigente e precisa ser trocado a cada edição nova (`CNFP` e `CNFP_EDITION`).
 
 As parcelas são razões entre áreas no mesmo lugar, calculadas direto em graus. A sobreposição conta só
 imóveis do mesmo estado. Na atualização semanal, o cálculo roda depois da publicação de cada estado; uma

@@ -352,7 +352,7 @@ async function withQuality(rows) {
           sustainable_use_share: q.sustainable_use_share, indigenous_land: q.indigenous_land,
           conservation_unit: q.conservation_unit, conservation_category: q.conservation_category,
           embargo_count: q.embargo_count === undefined || q.embargo_count === null ? undefined : Number(q.embargo_count),
-          embargo_share: q.embargo_share });
+          embargo_share: q.embargo_share, public_forest_share: q.public_forest_share });
       });
     } catch (error) {
       console.warn("Indicadores de qualidade indisponíveis", error);
@@ -383,6 +383,12 @@ function conservationText(p) {
   if (!strict && !sustainable) return "Não";
   const group = strict ? "proteção integral" : "uso sustentável";
   return `${titleCase(p.conservation_unit)} (${group}): ${pct(strict ? p.strict_protection_share : p.sustainable_use_share)}`;
+}
+
+// Floresta pública não destinada ("tipo B"), pelo Cadastro Nacional de Florestas Públicas.
+function forestText(p) {
+  if (p.public_forest_share === undefined || p.public_forest_share === null) return p.status === "cancelled" ? "Não calculada (cancelado)" : "—";
+  return p.public_forest_share >= 0.01 ? pct(p.public_forest_share) : "Não";
 }
 
 // Embargos ambientais ativos do Ibama sobre o imóvel.
@@ -558,6 +564,7 @@ function record(p) {
       <div><dt>Em terra indígena</dt><dd>${indigenousText(p)}</dd></div>
       <div><dt>Em unidade de conservação</dt><dd>${conservationText(p)}</dd></div>
       <div><dt>Embargo do Ibama</dt><dd>${embargoText(p)}</dd></div>
+      <div><dt>Em floresta pública não destinada</dt><dd>${forestText(p)}</dd></div>
     </dl>`;
   el.querySelector("h3").textContent = `${p.municipality}, ${p.state}`;
   el.querySelector(".code").textContent = p.property_code;

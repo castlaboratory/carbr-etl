@@ -593,6 +593,11 @@ FUNAI_WFS = ("https://geoserver.funai.gov.br/geoserver/Funai/ows?service=WFS&ver
 CNUC_LIVE = "https://cnuc-backend.mma.gov.br/api/v1/downloadGeo"
 CNUC_LIVE_BODY = {"format": "shp", "map": "/var/www/storage/app/mapfiles/ucs.map", "name": "ucs",
                   "typename": "ucs_selected", "ucIds": "null"}
+# Florestas públicas: Cadastro Nacional de Florestas Públicas (CNFP), do Serviço Florestal Brasileiro, no portal
+# de mapas do SFB. O identificador é o da edição 2025/2 (13/11/2026); a cada edição nova o SFB publica outro
+# item, e este endereço precisa ser trocado (a página do cadastro aponta para o item vigente).
+CNFP = "https://mapas.florestal.gov.br/portal/sharing/rest/content/items/0bbb2f934edc4336ba185f1b82b83319/data"
+CNFP_EDITION = "CNFP 2025/2 (13/11/2026)"
 # Reserva: o último shapefile semestral hospedado no portal de dados do MMA.
 CNUC_DATASET = "https://dados.mma.gov.br/api/3/action/package_show?id=unidadesdeconservacao"
 BROWSER_AGENT = "Mozilla/5.0 (compatible; carbr-etl; +https://github.com/castlaboratory/carbr-etl)"
@@ -665,7 +670,8 @@ def protected() -> Path | None:
     """Terras indígenas (Funai) e unidades de conservação (CNUC/MMA) num Parquet local, por 30 dias.
 
     Uma linha por área: `kind` (indigenous, strict = proteção integral, sustainable = uso
-    sustentável), `name`, `category` e a geometria em SIRGAS 2000. O CNUC vem do download do mapa
+    sustentável, public_forest = floresta pública não destinada, "tipo B"), `name`, `category` e a
+    geometria em SIRGAS 2000. As florestas tipo B vêm do Cadastro Nacional de Florestas Públicas (SFB). O CNUC vem do download do mapa
     (dados correntes) ou, se ele falhar, do último shapefile do portal de dados do MMA. Se uma
     fonte falhar, vale a cópia anterior; `None` se não houver nenhuma. Com `CAR_PROTECTED_OFFLINE=1`
     nada é baixado: o Parquet é refeito com os arquivos que já estão em `data/protected/`.
@@ -713,7 +719,21 @@ def protected() -> Path | None:
                                         "downloaded": today}
     except Exception as err:
         log(f"áreas protegidas: CNUC indisponível ({err})")
+    try:
+        if not offline and (info.get("public_forest", {}).get("edition") != CNFP_EDITION
+                            or not list(folder.glob("cnfp/*.shp"))):
+            if not get(CNFP, archive, 3600) or not unpack_shapefile(archive, folder / "cnfp"):
+                raise ValueError("download do shapefile falhou")
+            archive.unlink(missing_ok=True)
+            info["public_forest"] = {"source": "SFB, Cadastro Nacional de Florestas Públicas (CNFP)",
+                                     "edition": CNFP_EDITION, "url": CNFP, "downloaded": today}
+    except Exception as err:
+        log(f"áreas protegidas: CNFP indisponível ({err})")
     parts = []
+    forests = sorted(folder.glob("cnfp/*.shp"))
+    if forests:
+        parts.append(f"""SELECT 'public_forest' AS kind, categoria || ' ' || lower(governo) AS name, classe AS category, geom
+                         FROM ST_Read('{forests[-1]}') WHERE tipo = 'TIPO B'""")
     if funai.exists():
         parts.append(f"""SELECT 'indigenous' AS kind, terrai_nome AS name, fase_ti AS category, geom
                          FROM ST_Read('{funai}')""")
@@ -944,6 +964,7 @@ def quality(uf: str) -> None:
                    {share('ti')} AS indigenous_share,
                    {share('pi')} AS strict_protection_share,
                    {share('us')} AS sustainable_use_share,
+                   {share('fb')} AS public_forest_share,
                    ti.name AS indigenous_land,
                    coalesce(pi.name, us.name) AS conservation_unit,
                    coalesce(pi.category, us.category) AS conservation_category,
@@ -954,6 +975,7 @@ def quality(uf: str) -> None:
                  LEFT JOIN shares ti ON ti.rid = p.rid AND ti.kind = 'indigenous'
                  LEFT JOIN shares pi ON pi.rid = p.rid AND pi.kind = 'strict'
                  LEFT JOIN shares us ON us.rid = p.rid AND us.kind = 'sustainable'
+                 LEFT JOIN shares fb ON fb.rid = p.rid AND fb.kind = 'public_forest'
             ORDER BY p.municipality_code, p.property_code
         ) TO '{quality_file}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 8192)
     """)
@@ -972,17 +994,19 @@ def quality(uf: str) -> None:
                    round(sum(p.area_ha * q.strict_protection_share), 2) AS strict_protection_ha,
                    count(*) FILTER (q.sustainable_use_share > 0.01) AS sustainable_use,
                    round(sum(p.area_ha * q.sustainable_use_share), 2) AS sustainable_use_ha,
+                   count(*) FILTER (q.public_forest_share > 0.01) AS public_forest,
+                   round(sum(p.area_ha * q.public_forest_share), 2) AS public_forest_ha,
                    count(*) FILTER (q.embargo_count > 0) AS embargoed,
                    round(sum(p.area_ha * q.embargo_share), 2) AS embargo_ha
             FROM '{quality_file}' q JOIN p USING (property_code)
             GROUP BY ALL ORDER BY q.municipality_code
         ) TO '{towns_file}' (FORMAT parquet, COMPRESSION zstd)
     """)
-    n, touching, half, out_half, in_ti, in_pi, in_us, embargoed = con.execute(f"""
+    n, touching, half, out_half, in_ti, in_pi, in_us, embargoed, in_fb = con.execute(f"""
         SELECT count(*), count(*) FILTER (overlap_share > 0.01), count(*) FILTER (overlap_share > 0.5),
                count(*) FILTER (outside_share > 0.5), count(*) FILTER (indigenous_share > 0.01),
                count(*) FILTER (strict_protection_share > 0.01), count(*) FILTER (sustainable_use_share > 0.01),
-               count(*) FILTER (embargo_count > 0)
+               count(*) FILTER (embargo_count > 0), count(*) FILTER (public_forest_share > 0.01)
         FROM '{quality_file}'
     """).fetchone()
     files = {f"quality/state={uf}.parquet": quality_file,
@@ -1005,7 +1029,7 @@ def quality(uf: str) -> None:
                   Body=json.dumps(cat, indent=2, ensure_ascii=False).encode())
     log(f"{uf}: qualidade de {n} imóveis em {time.time() - t0:.0f}s; {touching} com sobreposição acima de 1%, "
         f"{half} acima de 50%, {out_half} com mais da metade fora do município; {in_ti} em terra indígena, "
-        f"{in_pi} em proteção integral, {in_us} em uso sustentável, {embargoed} com embargo do Ibama"
+        f"{in_pi} em proteção integral, {in_us} em uso sustentável, {embargoed} com embargo do Ibama, {in_fb} em floresta pública tipo B"
         + ("" if boundaries else " (sem malha do IBGE)"))
 
 
